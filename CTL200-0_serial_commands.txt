@@ -1,0 +1,35 @@
+Command 	Description 	Type 	Unit 	Default 	Min 	Max
+lason 	Disable | enable laser current 	R/W 		0 	0 	1
+ilaser 	Laser current. 	R/W 	mA 	0.0 	0.0
+vlaser 	Laser voltage 	R 	V
+ldelay 	Time between when the controller lights up and when the laser lights up 	R/W 	ms 	1000.0 	10.0 	100000.0
+ilmax 	Software current limit 	R/W 	mA 	1000.0 	0.0 	1000.0
+lckon 	Disable | enable interlock functionality 	R/W 		0 	0 	1
+lmodgain 	Laser current AIN1 modulation gain 	R/W 	mA/V 	0 	-100000.0 	+100000.0
+tecon 	Disable | enable TEC current 	R/W 		0 	0 	1
+tprot 	Disable | enable temperature protection 	R/W 		1 	0 	1
+rtset 	Thermistor resistance setpoint 	R/W 	Ω 	10000.0 	rtmin 	rtmax
+rtact 	Actual value of thermistor resistance 	R 	Ω
+itec 	TEC current 	R 	A
+vtec 	TEC voltage 	R 	V
+pgain 	Proportional gain of the temperature controller 	R/W 		0.001 	0.0 	0.1
+igain 	Integral gain of the temperature controller 	R/W 		0.0001 	0.0 	0.1
+dgain 	Differential gain of the temperature controller 	R/W 		0.001 	0.0 	0.1
+rtmin 	Minimum thermistor resistance. If temperature protection is enabled, the laser current is automatically disabled below this value. 	R/W 	Ω 	5000.0 	500.0 	200000.0
+rtmax 	Maximum thermistor resistance. If temperature protection is enabled, the laser current is automatically disabled above this value. 	R/W 	Ω 	15000.0 	500.0 	200000.0
+vtmin 	Minimum TEC voltage 	R/W 	V 	-2.0 	-3.0 	0.0
+vtmax 	Maximum TEC voltage 	R/W 	V 	2.0 	0.0 	3.0
+tmodgain 	Temperature AIN2 modulation gain 	R/W 	Ω/V 	0 	-100000.0 	+100000.0
+iphd 	Photodiode current 	R 	mA 		0.0 	2.5
+ain1 	AI1 pin voltage 	R 	V 		0.0 	2.5
+ain2 	AI2 pin voltage 	R 	V 		0.0 	2.5
+tboard 	Board temperature 	R 	°C
+version 	Firmware version 	R 		v0.17
+status 	Return lason, vlaser, itec, vtec, rtact, iphd, ain1, ain2. 	R
+save 	Save configuration in internal memory (no argument) 	W
+serial 	Return the serial number 	R
+userdata write 	Write the user data (e.g. userdata write ABC) 	W 				31 chars
+userdata 	Read the user data 	R
+brate 	UART baud rate 	R/W 	baud 	115200 	9600 	460800
+err 	Return the error code in hexadecimal format (no argument) 	R
+errclr 	Clear the error code (no argument) 	W
