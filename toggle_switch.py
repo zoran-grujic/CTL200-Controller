@@ -42,6 +42,7 @@ class AnimatedToggle(QCheckBox):
         # Animation properties
         self._handle_position = 0
         self._pulse_radius = 0
+        self._animation_enabled = True  # Track if animation should run
 
         # Setup animations
         self._animation = QPropertyAnimation(self, b"handle_position", self)
@@ -58,10 +59,34 @@ class AnimatedToggle(QCheckBox):
         """Handle state change and animate"""
         self._animation.stop()
         if state == Qt.CheckState.Checked.value:
+            self._animation.setStartValue(self._handle_position)
             self._animation.setEndValue(self._bar_width - self._handle_radius)
         else:
+            self._animation.setStartValue(self._handle_position)
             self._animation.setEndValue(0)
-        self._animation.start()
+
+        if self._animation_enabled:
+            self._animation.start()
+        else:
+            # Jump immediately without animation
+            self._handle_position = self._animation.endValue()
+            self.update()
+
+    def setChecked(self, checked):
+        """Override setChecked to handle initial position properly"""
+        # Store signals blocked state
+        was_blocked = self.signalsBlocked()
+
+        # Call parent setChecked
+        super().setChecked(checked)
+
+        # If signals were blocked, manually update handle position since _on_state_changed won't be called
+        if was_blocked:
+            if checked:
+                self._handle_position = self._bar_width - self._handle_radius
+            else:
+                self._handle_position = 0
+            self.update()
 
     @pyqtProperty(int)
     def handle_position(self):
@@ -149,18 +174,18 @@ class LaserToggle(AnimatedToggle):
 
 class TECToggle(AnimatedToggle):
     """
-    Specialized toggle for TEC control with cool/warm colors
-    BLUE when OFF (cold)
-    ORANGE when ON (heating/cooling active)
+    Specialized toggle for TEC control - identical appearance to Laser toggle
+    RED when OFF (danger - inactive)
+    GREEN when ON (safe - active)
     """
 
     def __init__(self, parent=None):
         super().__init__(
             parent=parent,
-            bar_color_on=QColor(255, 152, 0),    # Material Orange
-            bar_color_off=QColor(96, 125, 139),  # Blue Gray
+            bar_color_on=QColor(76, 175, 80),    # Material Green (same as Laser)
+            bar_color_off=QColor(200, 50, 50),   # Red (same as Laser)
             handle_color=QColor(255, 255, 255),
-            pulse_on_color=QColor(255, 200, 100)
+            pulse_on_color=QColor(100, 255, 100)
         )
 
 

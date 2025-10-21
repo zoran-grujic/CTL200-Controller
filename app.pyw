@@ -1,5 +1,6 @@
 import sys
-import qdarkgraystyle
+import qdarktheme  # PyQt6-compatible dark theme, pip install pyqtdarktheme
+
 import numpy as np
 import time
 import collections
@@ -10,7 +11,7 @@ import os
 os.environ['PYQTGRAPH_QT_LIB'] = 'PyQt6'
 
 import pyqtgraph as pg
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtWidgets, QtGui
 
 # Import the generated UI class
 from gui import Ui_MainWindow
@@ -29,11 +30,10 @@ class MyUi(Ui_MainWindow):
     CTL200-0 Laser Controller UI
     Features:
     - Automatic device detection and connection
-    - Temperature monitoring with live plot
-    - Laser control
+    - Temperature monitoring with live plot (in-memory only)
+    - Laser and TEC control (all in Laser tab)
     - Configuration persistence
     - Safety: Laser always OFF on startup/shutdown
-    - Event-driven tab activation for Temperature and Laser tabs
     """
 
     def __init__(self):
@@ -61,6 +61,19 @@ class MyUi(Ui_MainWindow):
         self.temperature_R = collections.deque(maxlen=500)
         self.sample_time = collections.deque(maxlen=500)
 
+        # Deques to store recent status values (timestamped). Appended when 'status' replies arrive.
+        # Bounded size to avoid unbounded memory growth.
+        self.status_time = collections.deque(maxlen=2000)
+        self.status_lason = collections.deque(maxlen=2000)
+        self.status_vlaser = collections.deque(maxlen=2000)
+        self.status_ilaser = collections.deque(maxlen=2000)
+        self.status_itec = collections.deque(maxlen=2000)
+        self.status_vtec = collections.deque(maxlen=2000)
+        self.status_rtact = collections.deque(maxlen=2000)
+        self.status_iphd = collections.deque(maxlen=2000)
+        self.status_ain1 = collections.deque(maxlen=2000)
+        self.status_ain2 = collections.deque(maxlen=2000)
+
     def setupUi(self, MainWindow):
         # Store main window reference
         self.main_window = MainWindow
@@ -80,21 +93,29 @@ class MyUi(Ui_MainWindow):
         # Initialize the plot curve
         self.plot_curve = self.arbPlot.plot([], [], pen=pg.mkPen(color='#00FF00', width=2))
 
-        # Replace the plot placeholder in tab_temperature
+        # Replace the plot placeholder with actual plot widget (now in Laser tab)
         try:
-            # Get the layout of tab_temperature
-            temp_layout = self.tab_temperature.layout()
-
-            # Remove the placeholder widget
-            if self.PlotPlaceholder:
-                temp_layout.removeWidget(self.PlotPlaceholder)
-                self.PlotPlaceholder.hide()
-                self.PlotPlaceholder.deleteLater()
-
-            # Add our plot widget
-            temp_layout.addWidget(self.plotWindow)
+            # Find the PlotPlaceholder widget and replace it with our plot
+            if hasattr(self, 'PlotPlaceholder') and self.PlotPlaceholder:
+                # Get the parent layout
+                parent_widget = self.PlotPlaceholder.parent()
+                if parent_widget:
+                    parent_layout = parent_widget.layout()
+                    if parent_layout:
+                        # Find the placeholder in the layout
+                        for i in range(parent_layout.count()):
+                            item = parent_layout.itemAt(i)
+                            if item and item.widget() == self.PlotPlaceholder:
+                                # Remove placeholder
+                                parent_layout.removeWidget(self.PlotPlaceholder)
+                                self.PlotPlaceholder.hide()
+                                self.PlotPlaceholder.deleteLater()
+                                # Add plot widget at the same position
+                                parent_layout.insertWidget(i, self.plotWindow)
+                                print("✓ Temperature plot added to Laser tab")
+                                break
         except Exception as e:
-            print(f"Error setting up plot: {e}")
+            print(f"✗ Error setting up temperature plot: {e}")
 
         # Create and add Laser toggle switch to Laser tab
         try:
@@ -102,16 +123,33 @@ class MyUi(Ui_MainWindow):
             if hasattr(self, 'checkBox_LaserEnable'):
                 print("ℹ Found laser toggle placeholder, replacing...")
                 self.laser_toggle = LaserToggle(parent=self.tabLaserControll)
-                laser_layout = self.tabLaserControll.layout()
-                for i in range(laser_layout.count()):
-                    item = laser_layout.itemAt(i)
-                    if item and item.widget() == self.checkBox_LaserEnable:
-                        laser_layout.removeWidget(self.checkBox_LaserEnable)
-                        self.checkBox_LaserEnable.hide()
-                        self.checkBox_LaserEnable.deleteLater()
-                        laser_layout.insertWidget(i, self.laser_toggle)
-                        print("✓ Replaced placeholder with animated toggle")
-                        break
+
+                # Find the checkbox in the layout - it's in gridLayout_2
+                if hasattr(self, 'gridLayout_2'):
+                    # The Laser checkbox is at row 0, column 0 in gridLayout_2
+                    # Remove the old checkbox
+                    self.gridLayout_2.removeWidget(self.checkBox_LaserEnable)
+                    self.checkBox_LaserEnable.setParent(None)
+                    self.checkBox_LaserEnable.hide()
+                    self.checkBox_LaserEnable.deleteLater()
+
+                    # Add the toggle switch at the same position
+                    self.gridLayout_2.addWidget(self.laser_toggle, 0, 0, 1, 1)
+                    print("✓ Replaced Laser checkbox with animated toggle")
+                else:
+                    # Fallback if gridLayout_2 not found
+                    print("⚠ gridLayout_2 not found, trying alternate approach...")
+                    laser_layout = self.tabLaserControll.layout()
+                    for i in range(laser_layout.count()):
+                        item = laser_layout.itemAt(i)
+                        if item and item.widget() == self.checkBox_LaserEnable:
+                            laser_layout.removeWidget(self.checkBox_LaserEnable)
+                            self.checkBox_LaserEnable.setParent(None)
+                            self.checkBox_LaserEnable.hide()
+                            self.checkBox_LaserEnable.deleteLater()
+                            laser_layout.insertWidget(i, self.laser_toggle)
+                            print("✓ Replaced placeholder with animated toggle")
+                            break
             else:
                 print("ℹ No placeholder found, adding toggle manually...")
                 self.laser_toggle = LaserToggle(parent=self.tabLaserControll)
@@ -191,8 +229,8 @@ class MyUi(Ui_MainWindow):
         self.doubleSpinBox_LaserCurrent.setEnabled(False)  # Disabled until connected
 
         # Connect Temperature spinbox signal
-        self.doubleSpinBox_SetTemperature_2.valueChanged.connect(self.on_temperature_changed)
-        self.doubleSpinBox_SetTemperature_2.setEnabled(False)  # Disabled until connected
+        self.doubleSpinBox_SetTemperature.valueChanged.connect(self.on_temperature_changed)
+        self.doubleSpinBox_SetTemperature.setEnabled(False)  # Disabled until connected
 
         # Connect PID gain spinbox signals
         self.doubleSpinBox_P.valueChanged.connect(self.on_pgain_changed)
@@ -206,6 +244,12 @@ class MyUi(Ui_MainWindow):
         self.pushButton_SaveSettings.clicked.connect(self.on_save_settings_clicked)
 
 
+        # Communication log batching for performance
+        self._log_buffer = []
+        self._log_paused = False  # Flag to track if logging is paused
+        self._log_timer = QtCore.QTimer()
+        self._log_timer.timeout.connect(self._flush_log_buffer)
+        self._log_timer.start(100)  # Flush every 100ms instead of realtime
 
         # Connect tab change signal to handle tab activation
         self.tabWidget.currentChanged.connect(self.on_tab_changed)
@@ -217,7 +261,7 @@ class MyUi(Ui_MainWindow):
         MainWindow.setWindowTitle("CTL200-0 Laser Controller")
 
         # Start with Serial Connection tab active (will switch to Laser after connection)
-        self.tabWidget.setCurrentIndex(1)  # Index 1 is Serial Connection tab
+        self.tabWidget.setCurrentIndex(2)  # Index 1 is Serial Connection tab
 
         # Plot some example data
         self.plot_example_data()
@@ -329,7 +373,7 @@ Device is ready for operation.
         self.doubleSpinBox_LaserCurrent.setEnabled(True)
 
         # Enable temperature spinbox
-        self.doubleSpinBox_SetTemperature_2.setEnabled(True)
+        self.doubleSpinBox_SetTemperature.setEnabled(True)
 
         # Enable PID gain spinboxes
         self.doubleSpinBox_P.setEnabled(True)
@@ -341,9 +385,12 @@ Device is ready for operation.
         self.doubleSpinBox_I.setEnabled(True)
         self.doubleSpinBox_D.setEnabled(True)
 
-        # Auto-enable TEC on startup
+        # Check if config file exists and apply settings
+        QtCore.QTimer.singleShot(500, lambda: self._apply_config_settings_on_startup())
+
+        # Auto-enable TEC on startup (after settings are applied)
         print("ℹ Auto-enabling TEC on startup...")
-        QtCore.QTimer.singleShot(1000, lambda: self._auto_enable_tec())
+        QtCore.QTimer.singleShot(1500, lambda: self._auto_enable_tec())
 
         # Start the worker thread for periodic status updates
         self._start_status_polling()
@@ -371,12 +418,170 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
         print(f"✗ Failed to connect to CTL200-0 device")
         print(f"✗ Last error: {self.my_serial.last_error}")
 
+    def _apply_config_settings_on_startup(self):
+        """Check if config file exists and apply settings to device on startup"""
+        try:
+            # Check if config file exists
+            if not self.config.config_file.exists():
+                print("ℹ No config file found - device will use default settings")
+                return
+
+            print("✓ Config file found - applying saved settings to device...")
+
+            # Get laser configuration
+            laser_config = self.config.get_laser_config()
+
+            # Get TEC configuration
+            tec_config = self.config.get_tec_config()
+
+            # Apply settings to device with small delays between commands
+            settings_applied = []
+
+            # Apply laser current (ilaser)
+            if 'ilaser' in laser_config:
+                ilaser = laser_config['ilaser']
+                self.my_serial.sendToBox(f"ilaser {ilaser:.6f}")
+                time.sleep(0.05)
+                settings_applied.append(f"ilaser={ilaser:.3f}mA")
+                # Update UI
+                self.doubleSpinBox_LaserCurrent.blockSignals(True)
+                self.doubleSpinBox_LaserCurrent.setValue(ilaser)
+                self.doubleSpinBox_LaserCurrent.blockSignals(False)
+
+            # Apply laser max current (ilmax) if present
+            if 'ilmax' in laser_config:
+                ilmax = laser_config['ilmax']
+                self.my_serial.sendToBox(f"ilmax {ilmax:.6f}")
+                time.sleep(0.05)
+                settings_applied.append(f"ilmax={ilmax:.3f}mA")
+
+            # Apply temperature setpoint (rtset)
+            if 'rtset' in tec_config:
+                rtset = tec_config['rtset']
+                self.my_serial.sendToBox(f"rtset {rtset:.6f}")
+                time.sleep(0.05)
+                settings_applied.append(f"rtset={rtset:.3f}Ω")
+                # Update UI
+                self.doubleSpinBox_SetTemperature.blockSignals(True)
+                self.doubleSpinBox_SetTemperature.setValue(rtset)
+                self.doubleSpinBox_SetTemperature.blockSignals(False)
+
+            # Apply PID gains
+            if 'pgain' in tec_config:
+                pgain = tec_config['pgain']
+                self.my_serial.sendToBox(f"pgain {pgain:.6f}")
+                time.sleep(0.05)
+                settings_applied.append(f"pgain={pgain:.6f}")
+                # Update UI
+                self.doubleSpinBox_P.blockSignals(True)
+                self.doubleSpinBox_P.setValue(pgain)
+                self.doubleSpinBox_P.blockSignals(False)
+
+            if 'igain' in tec_config:
+                igain = tec_config['igain']
+                self.my_serial.sendToBox(f"igain {igain:.6f}")
+                time.sleep(0.05)
+                settings_applied.append(f"igain={igain:.6f}")
+                # Update UI
+                self.doubleSpinBox_I.blockSignals(True)
+                self.doubleSpinBox_I.setValue(igain)
+                self.doubleSpinBox_I.blockSignals(False)
+
+            if 'dgain' in tec_config:
+                dgain = tec_config['dgain']
+                self.my_serial.sendToBox(f"dgain {dgain:.6f}")
+                time.sleep(0.05)
+                settings_applied.append(f"dgain={dgain:.6f}")
+                # Update UI
+                self.doubleSpinBox_D.blockSignals(True)
+                self.doubleSpinBox_D.setValue(dgain)
+                self.doubleSpinBox_D.blockSignals(False)
+
+            # Apply temperature protection (tprot) if present
+            if 'tprot' in tec_config:
+                tprot = tec_config['tprot']
+                self.my_serial.sendToBox(f"tprot {tprot}")
+                time.sleep(0.05)
+                settings_applied.append(f"tprot={tprot}")
+
+            print(f"✓ Settings applied: {', '.join(settings_applied)}")
+
+            if hasattr(self, 'statusbar'):
+                self.statusbar.showMessage("Settings loaded from config file", 3000)
+
+        except Exception as e:
+            print(f"✗ Error applying config settings: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _auto_enable_tec(self):
+        """Auto-enable TEC on startup (safety feature) and sync UI with actual device state"""
+        try:
+            # Read tecon state to sync UI (lason is already in status command)
+            print("ℹ Reading TEC state from device...")
+            self.my_serial.sendToBox("tecon")
+            time.sleep(0.05)
+            tecon_response = self.my_serial.readLine()
+            if tecon_response:
+                try:
+                    tecon_state = int(tecon_response.strip())
+                    print(f"ℹ Current tecon state: {tecon_state}")
+                    # Sync TEC toggle with actual state
+                    self.tec_toggle.blockSignals(True)
+                    self.tec_toggle.setChecked(tecon_state == 1)
+                    self.tec_toggle.blockSignals(False)
+                except ValueError:
+                    print(f"⚠ Could not parse tecon response: {tecon_response}")
+
+            # Ensure laser is OFF (safety first)
+            # Note: lason state is synced automatically via status command polling
+            print("ℹ Ensuring laser is OFF for safety...")
+            self.my_serial.sendToBox("lason 0")
+            time.sleep(0.1)
+
+            # Update laser toggle UI to OFF
+            self.laser_toggle.blockSignals(True)
+            self.laser_toggle.setChecked(False)
+            self.laser_toggle.blockSignals(False)
+
+            # Enable TEC
+            print("ℹ Enabling TEC for temperature control...")
+            self.my_serial.sendToBox("tecon 1")
+            time.sleep(0.1)
+
+            # Update TEC toggle UI to ON
+            self.tec_toggle.blockSignals(True)
+            self.tec_toggle.setChecked(True)
+            self.tec_toggle.blockSignals(False)
+
+            print("✓ TEC enabled, Laser OFF (safe state)")
+
+            if hasattr(self, 'statusbar'):
+                self.statusbar.showMessage("TEC enabled - Device ready", 3000)
+
+        except Exception as e:
+            print(f"✗ Error during auto-enable TEC: {e}")
+            import traceback
+            traceback.print_exc()
+
     def _start_status_polling(self):
+
         """Start the worker thread for periodic device status polling"""
         try:
             # Create worker and thread
             self.serial_worker = SerialWorker(self.my_serial)
             self.serial_thread = QtCore.QThread()
+
+            # Configure worker (set poll interval and optional read intervals)
+            try:
+                self.serial_worker.poll_interval = 0.05
+                # keep ilaser/tecon at 1s by default (can be adjusted elsewhere)
+                self.serial_worker.ilaser_interval = getattr(self.serial_worker, 'ilaser_interval', 1.0)
+                self.serial_worker.tecon_interval = getattr(self.serial_worker, 'tecon_interval', 1.0)
+                # Enable detailed logging by default to show all TX/RX in textEdit_SerialPort
+                self.serial_worker.detailed_logging = True
+            except Exception:
+                pass
 
             # Move worker to thread
             self.serial_worker.moveToThread(self.serial_thread)
@@ -386,6 +591,7 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             self.serial_worker.error_occurred.connect(self._handle_worker_error)
             self.serial_worker.command_completed.connect(self._handle_command_completed)
             self.serial_worker.communication_log.connect(self._update_communication_log)
+            self.serial_worker.raw_data_received.connect(self._update_raw_data_display)
 
             # Connect thread started signal to worker's start method
             self.serial_thread.started.connect(self.serial_worker.start_polling)
@@ -394,10 +600,22 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             self.temperature_R.clear()
             self.sample_time.clear()
 
+            # Also clear the status deques
+            self.status_time.clear()
+            self.status_lason.clear()
+            self.status_vlaser.clear()
+            self.status_ilaser.clear()
+            self.status_itec.clear()
+            self.status_vtec.clear()
+            self.status_rtact.clear()
+            self.status_iphd.clear()
+            self.status_ain1.clear()
+            self.status_ain2.clear()
+
             # Start the thread
             self.serial_thread.start()
 
-            print("✓ Status polling thread started (200ms interval)")
+            print("✓ Status polling thread started (50ms interval)")
 
         except Exception as e:
             print(f"✗ Error starting status polling: {e}")
@@ -415,6 +633,22 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             print("✓ Status polling thread stopped")
 
     def _update_status_display(self, status_data):
+
+        # Timestamp for this status update
+        current_timestamp = time.time()
+
+        # Append incoming data to status deques (use status_data.get to avoid KeyError)
+        self.status_time.append(current_timestamp)
+        self.status_lason.append(status_data.get('lason', None))
+        self.status_vlaser.append(status_data.get('vlaser', None))
+        self.status_ilaser.append(status_data.get('ilaser', None))
+        self.status_itec.append(status_data.get('itec', None))
+        self.status_vtec.append(status_data.get('vtec', None))
+        self.status_rtact.append(status_data.get('rtact', None))
+        self.status_iphd.append(status_data.get('iphd', None))
+        self.status_ain1.append(status_data.get('ain1', None))
+        self.status_ain2.append(status_data.get('ain2', None))
+
         """Update GUI labels with status data from worker thread"""
         try:
             # Update laser current
@@ -438,7 +672,7 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
                 # Update the plot
                 if self.plot_curve is not None and len(self.sample_time) > 0:
                     t = np.array(self.sample_time)
-                    t = t-t[-1]  # Relative time in seconds
+                    t = t - t[-1]  # Relative time in seconds
                     self.plot_curve.setData(t, list(self.temperature_R))
 
             # Update laser toggle state if it changed
@@ -448,6 +682,14 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
                     self.laser_toggle.blockSignals(True)
                     self.laser_toggle.setChecked(laser_on)
                     self.laser_toggle.blockSignals(False)
+
+                # Update laser current label color based on laser state
+                if laser_on:
+                    # Laser is ON - green color
+                    self.label_LaserCurrent_mA.setStyleSheet("color: #4CAF50; font-weight: bold;")
+                else:
+                    # Laser is OFF - red color
+                    self.label_LaserCurrent_mA.setStyleSheet("color: #F44336; font-weight: bold;")
 
             # Update TEC toggle state if it changed
             if 'tecon' in status_data:
@@ -498,23 +740,136 @@ Serial Communication Log
         except Exception as e:
             print(f"✗ Error adding communication log header: {e}")
 
-    def _update_communication_log(self, log_entry):
-        """Update the communication log text display"""
+    def _update_communication_log(self, timestamp, direction, message):
+        """Update the communication log text display with batching for performance"""
         try:
-            # Append the log entry to the text edit
-            self.textEdit_SerialPort.append(log_entry)
+            # Skip logging if paused
+            if self._log_paused:
+                return
+
+            # Format the log entry
+            if direction == 'TX':
+                color = '#00FF00'  # Green for transmitted
+                arrow = '→'
+            else:
+                color = '#00AAFF'  # Blue for received
+                arrow = '←'
+
+            log_entry = f'<span style="color: #888;">[{timestamp}]</span> <span style="color: {color};">{arrow} {message}</span><br>'
+
+            # Add to buffer instead of immediate append (batched updates)
+            self._log_buffer.append(log_entry)
+
+            # Limit buffer size to prevent memory issues
+            if len(self._log_buffer) > 1000:
+                self._log_buffer = self._log_buffer[-500:]  # Keep last 500
+
         except Exception as e:
             print(f"✗ Error updating communication log: {e}")
 
-    def _auto_enable_tec(self):
-        """Automatically enable TEC on startup"""
+    def _flush_log_buffer(self):
+        """Flush buffered log entries to the text widget (called periodically)"""
         try:
-            if self.my_serial.is_connected() and not self.tec_toggle.isChecked():
-                print("ℹ Auto-enabling TEC...")
-                self.tec_toggle.setChecked(True)
-                print("✓ TEC auto-enabled on startup")
+            # Skip flushing if logging is paused
+            if self.checkBox_pauseLogging.checkState() is QtCore.Qt.CheckState.Checked:
+                return
+
+            if self._log_buffer and hasattr(self, 'textEdit_SerialPort'):
+                # Batch append all buffered entries at once
+                html_content = ''.join(self._log_buffer)
+                self.textEdit_SerialPort.insertHtml(html_content)
+
+                # Limit total text size to prevent slowdown
+                cursor = self.textEdit_SerialPort.textCursor()
+                cursor.movePosition(QtGui.QTextCursor.MoveOperation.Start)
+                # Keep only last ~10000 characters
+                if len(self.textEdit_SerialPort.toPlainText()) > 10000:
+                    cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+                    cursor.movePosition(QtGui.QTextCursor.MoveOperation.PreviousCharacter,
+                                      QtGui.QTextCursor.MoveMode.KeepAnchor,
+                                      len(self.textEdit_SerialPort.toPlainText()) - 8000)
+                    cursor.removeSelectedText()
+
+                # Auto-scroll to bottom
+                scrollbar = self.textEdit_SerialPort.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
+
+                # Clear buffer
+                self._log_buffer.clear()
+
         except Exception as e:
-            print(f"✗ Error auto-enabling TEC: {e}")
+            print(f"✗ Error flushing log buffer: {e}")
+
+    def _update_raw_data_display(self, raw_data):
+        """Display raw received data in textEdit_SerialPort_raw without any formatting"""
+        try:
+            # Skip logging if paused
+            if self.checkBox_pauseLogging.checkState() is QtCore.Qt.CheckState.Checked:
+                return
+
+            if hasattr(self, 'textEdit_SerialPort_raw'):
+                # Append raw data with only newlines preserved
+                self.textEdit_SerialPort_raw.insertPlainText(raw_data)
+                if not raw_data.endswith('\n'):
+                    self.textEdit_SerialPort_raw.insertPlainText('\n')
+
+                # Limit total text size to prevent slowdown
+                plain_text = self.textEdit_SerialPort_raw.toPlainText()
+                if len(plain_text) > 10000:
+                    # Keep only last ~8000 characters
+                    cursor = self.textEdit_SerialPort_raw.textCursor()
+                    cursor.movePosition(QtGui.QTextCursor.MoveOperation.Start)
+                    cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+                    cursor.movePosition(QtGui.QTextCursor.MoveOperation.PreviousCharacter,
+                                      QtGui.QTextCursor.MoveMode.KeepAnchor,
+                                      len(plain_text) - 8000)
+                    cursor.removeSelectedText()
+
+                # Auto-scroll to bottom
+                scrollbar = self.textEdit_SerialPort_raw.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
+
+        except Exception as e:
+            print(f"✗ Error updating raw data display: {e}")
+
+    def on_logging_toggled(self, state):
+        """Toggle detailed communication logging on/off"""
+        try:
+            enabled = (state == QtCore.Qt.CheckState.Checked)
+            if self.serial_worker:
+                self.serial_worker.detailed_logging = enabled
+
+            if enabled:
+                print("ℹ Serial communication logging enabled")
+                self.textEdit_SerialPort.append('<span style="color: #00FF00;">--- Logging enabled ---</span>')
+            else:
+                print("ℹ Serial communication logging disabled (for max performance)")
+                self.textEdit_SerialPort.append('<span style="color: #FF6600;">--- Logging disabled ---</span>')
+
+        except Exception as e:
+            print(f"✗ Error toggling logging: {e}")
+
+    def on_pause_logging_toggled(self, state):
+        """Pause or resume logging display"""
+        try:
+            paused = (state == QtCore.Qt.CheckState.Checked)
+            self._log_paused = paused
+
+            if paused:
+                print("ℹ Logging display paused (data still being collected)")
+                if hasattr(self, 'textEdit_SerialPort'):
+                    self.textEdit_SerialPort.append('<span style="color: #FFA500;">--- Logging display PAUSED ---</span>')
+                if hasattr(self, 'textEdit_SerialPort_raw'):
+                    self.textEdit_SerialPort_raw.append('--- Logging display PAUSED ---\n')
+            else:
+                print("ℹ Logging display resumed")
+                if hasattr(self, 'textEdit_SerialPort'):
+                    self.textEdit_SerialPort.append('<span style="color: #00FF00;">--- Logging display RESUMED ---</span>')
+                if hasattr(self, 'textEdit_SerialPort_raw'):
+                    self.textEdit_SerialPort_raw.append('--- Logging display RESUMED ---\n')
+
+        except Exception as e:
+            print(f"✗ Error toggling pause logging: {e}")
 
     def _read_laser_state(self):
         """Read and display current laser state"""
@@ -862,7 +1217,7 @@ Serial Communication Log
 
             # Get current values from UI
             laser_current = self.doubleSpinBox_LaserCurrent.value()
-            temperature_setpoint = self.doubleSpinBox_SetTemperature_2.value()
+            temperature_setpoint = self.doubleSpinBox_SetTemperature.value()
             p_gain = self.doubleSpinBox_P.value()
             i_gain = self.doubleSpinBox_I.value()
             d_gain = self.doubleSpinBox_D.value()
@@ -898,13 +1253,11 @@ Serial Communication Log
             tab_name = self.tabWidget.tabText(index)
             print(f"ℹ Tab changed to: {tab_name}")
 
-            # If Temperature tab is activated, read and update the temperature setpoint
-            if tab_name == "Temperature":
-                self._read_and_update_temperature_setpoint()
-
-            # If Laser Control tab is activated, read and update the laser current setpoint
-            elif tab_name == "Laser Control":
+            # If Laser Control tab is activated, read and update settings
+            # Note: Temperature controls are now in Laser tab
+            if tab_name == "Laser Control" or tab_name == "Laser":
                 self._read_and_update_laser_current()
+                self._read_and_update_temperature_setpoint()
 
         except Exception as e:
             print(f"✗ Error handling tab change: {e}")
@@ -927,7 +1280,7 @@ Serial Communication Log
                 
                 # Read all 4 parameters with retry logic
                 params = [
-                    ("rtset", self.doubleSpinBox_SetTemperature_2, "Ω", 3),
+                    ("rtset", self.doubleSpinBox_SetTemperature, "Ω", 3),
                     ("pgain", self.doubleSpinBox_P, "", 6),
                     ("igain", self.doubleSpinBox_I, "", 6),
                     ("dgain", self.doubleSpinBox_D, "", 6),
@@ -1042,7 +1395,8 @@ Serial Communication Log
 
 def main():
     app = QtWidgets.QApplication(sys.argv)
-    app.setStyleSheet(qdarkgraystyle.load_stylesheet())
+    # Apply PyQt6-compatible dark theme
+    app.setStyleSheet(qdarktheme.load_stylesheet())
 
     MainWindow = QtWidgets.QMainWindow()
     ui = MyUi()
@@ -1054,4 +1408,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

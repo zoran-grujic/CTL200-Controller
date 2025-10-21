@@ -67,12 +67,22 @@ class SerialWorker(QObject):
     error_occurred = pyqtSignal(str)   # Emits error messages
     command_completed = pyqtSignal(str, bool, str)  # command, success, response
     communication_log = pyqtSignal(str, str, str)  # timestamp, direction, message
+    raw_data_received = pyqtSignal(str)  # Emits raw received data without formatting
 
     def __init__(self, serial_device):
         super().__init__()
         self.serial_device = serial_device
         self.running = False
         self.poll_interval = 0.05  # 50ms for faster updates
+
+        # Interval for reading ilaser separately (seconds). Reading ilaser every status poll is expensive,
+        # so read it less often (e.g., 5 times per second) to keep status polls fast.
+        self.ilaser_interval = 0.2  # 200ms = 5 updates per second
+        self._last_ilaser_read = 0.0
+
+        # Interval for reading TEC enable state separately (seconds)
+        self.tecon_interval = 1.0
+        self._last_tecon_read = 0.0
 
         # Command queue for user commands
         self.command_queue = Queue()
@@ -82,8 +92,9 @@ class SerialWorker(QObject):
         self.paused = False
         self.executing_command = False
 
-        # Enable detailed logging
-        self.detailed_logging = True
+        # Disable detailed logging by default (it severely impacts polling rate)
+        # Can be enabled via UI toggle for debugging
+        self.detailed_logging = False
 
     def _log_communication(self, direction, message):
         """
@@ -125,10 +136,11 @@ class SerialWorker(QObject):
         Pauses when user commands are queued
         """
         while self.running:
+            cycle_start = time.time()
             try:
                 # Check if paused (e.g., during tab change reads)
                 if self.paused:
-                    time.sleep(0.05)  # Short sleep while paused
+                    time.sleep(max(0.005, min(0.05, self.poll_interval)))  # Short sleep while paused
                     continue
 
                 # Check if there are pending user commands
@@ -138,7 +150,10 @@ class SerialWorker(QObject):
 
                 if not self.serial_device.is_connected():
                     self.error_occurred.emit("Device not connected")
-                    time.sleep(self.poll_interval)
+                    # wait the poll interval before retrying
+                    remaining = self.poll_interval - (time.time() - cycle_start)
+                    if remaining > 0:
+                        time.sleep(remaining)
                     continue
 
                 # Wait for any pending response from previous status request
@@ -151,10 +166,12 @@ class SerialWorker(QObject):
                 # Send status command to get all values at once
                 self._log_communication('TX', 'status')
                 self.serial_device.sendToBox("status")
-                time.sleep(0.1)
+                # very small settle delay to allow device to start responding
+                time.sleep(max(0.002, min(0.01, self.poll_interval/10)))
 
                 # Read response, filtering out echo and prompt
-                response = self._read_response("status")
+                # choose a read timeout based on poll_interval (with sensible bounds)
+                response = self._read_response("status", timeout=None)
 
                 if response:
                     self._log_communication('RX', response)
@@ -163,15 +180,32 @@ class SerialWorker(QObject):
                     status_data = self._parse_status_response(response)
 
                     if status_data:
-                        # Read laser current separately
-                        ilaser = self._read_laser_current()
-                        if ilaser is not None:
-                            status_data['ilaser'] = ilaser
-
-                        # Emit the parsed data
+                         # Emit parsed status immediately (fast path)
                         self.status_updated.emit(status_data)
-                    else:
-                        logging.warning(f"Failed to parse status: {response}")
+
+                        # Now optionally read ilaser/tecon periodically without delaying the status emission
+                        now = time.time()
+
+                        # Read laser current separately, but only every ilaser_interval seconds
+                        if now - self._last_ilaser_read >= self.ilaser_interval:
+                            try:
+                                ilaser = self._read_laser_current()
+                                if ilaser is not None:
+                                    # Emit incremental update containing only the ilaser field
+                                    self.status_updated.emit({'ilaser': ilaser})
+                                self._last_ilaser_read = now
+                            except Exception as e:
+                                logging.warning(f"Error reading ilaser: {e}")
+
+                        # Read tecon (TEC enable) only periodically to avoid blocking every poll
+                        if now - self._last_tecon_read >= self.tecon_interval:
+                            try:
+                                tecon = self._read_tec_state()
+                                if tecon is not None:
+                                    self.status_updated.emit({'tecon': tecon})
+                                self._last_tecon_read = now
+                            except Exception as e:
+                                logging.warning(f"Error reading tecon: {e}")
                 else:
                     logging.warning("No response from status command")
 
@@ -180,8 +214,16 @@ class SerialWorker(QObject):
                 logging.error(error_msg)
                 self.error_occurred.emit(error_msg)
 
-            # Wait for next poll interval
-            time.sleep(self.poll_interval)
+            # Sleep only the remaining time to match poll_interval (break into small increments)
+            try:
+                elapsed = time.time() - cycle_start
+                remaining = self.poll_interval - elapsed
+                while self.running and remaining > 0:
+                    step = min(0.005, remaining)
+                    time.sleep(step)
+                    remaining -= step
+            except Exception:
+                pass
 
     def _execute_queued_commands(self):
         """
@@ -276,38 +318,137 @@ class SerialWorker(QObject):
         if not hasattr(self.serial_device.box, 'in_waiting'):
             return
 
-        max_wait = 0.3  # Maximum wait time in seconds
+        # Conservative short wait: keep this small so polling isn't stalled by lingering data
+        max_wait = max(0.005, min(0.02, self.poll_interval))
         start_time = time.time()
 
         while time.time() - start_time < max_wait:
-            if self.serial_device.box.in_waiting == 0:
+            try:
+                if self.serial_device.box.in_waiting == 0:
+                    return
+            except Exception:
                 return
-            time.sleep(0.01)
+            time.sleep(0.002)
 
-    def _read_response(self, command):
+    def _read_response(self, command, timeout=None):
         """
         Read response from device, filtering out command echo and prompt
         Returns: The actual response data or None
         """
         try:
-            start_time = time.time()
-            responses = []
+            # Determine effective timeout: if timeout provided use it, otherwise derive from poll_interval
+            if timeout is None:
+                # Conservative, tight timeout: scale with poll_interval but keep small caps to avoid long stalls
+                timeout = min(0.12, max(0.01, self.poll_interval * 1.2))
 
-            # Read all available lines within timeout
-            while time.time() - start_time < 0.3:
-                if self.serial_device.box.in_waiting > 0:
+            start_time = time.time()
+            buffer = bytearray()
+
+            # If underlying pyserial box is available, prefer non-blocking reads from it
+            box = getattr(self.serial_device, 'box', None)
+
+            # Track when we last received data to implement idle detection
+            last_data_time = start_time
+            line_terminator_found = False
+
+            # For status command, we expect 8 space-separated values
+            expected_status_fields = 8 if command == "status" else 0
+
+            while time.time() - start_time < timeout:
+                if box is not None:
+                    try:
+                        in_wait = box.in_waiting
+                    except Exception:
+                        in_wait = 0
+
+                    if in_wait > 0:
+                        # read all available bytes at once
+                        chunk = box.read(in_wait)
+                        if chunk:
+                            buffer.extend(chunk)
+                            last_data_time = time.time()
+                            # Check if we have a line terminator
+                            if b"\n" in buffer or b"\r" in buffer:
+                                line_terminator_found = True
+                            # Small delay to allow more data to accumulate in buffer
+                            time.sleep(0.003)
+                        else:
+                            time.sleep(0.002)
+                    else:
+                        # Check if response is complete
+                        if line_terminator_found:
+                            # For status command, verify we have enough fields
+                            if expected_status_fields > 0:
+                                try:
+                                    text = buffer.decode('ascii', errors='ignore')
+                                    # Count space-separated fields in the buffer
+                                    fields = text.strip().split()
+                                    if len(fields) >= expected_status_fields:
+                                        # We have complete data
+                                        break
+                                except:
+                                    pass
+
+                            # For other commands or if we've waited long enough, break
+                            if (time.time() - last_data_time) > 0.025:
+                                break
+                        # nothing available yet
+                        time.sleep(0.002)
+                else:
+                    # Fallback to serial_device.readLine (may block internally)
                     line = self.serial_device.readLine()
                     if line:
-                        responses.append(line)
-                else:
-                    time.sleep(0.01)
+                        # append the returned text (with a newline) so parsing is unified
+                        try:
+                            buffer.extend((line + "\n").encode('ascii'))
+                        except Exception:
+                            buffer.extend((line + "\n").encode('utf-8', errors='ignore'))
+                    else:
+                        time.sleep(0.002)
 
-            # Filter out command echo and prompt
-            for line in responses:
-                cleaned = line.strip()
-                # Skip empty lines, command echoes, and prompts
-                if cleaned and cleaned not in [command, ">>", ">"]:
-                    return cleaned
+            if not buffer:
+                return None
+
+            # Decode buffer
+            try:
+                text = buffer.decode('ascii', errors='ignore')
+            except Exception:
+                text = buffer.decode('utf-8', errors='ignore')
+
+            # Emit raw data (unformatted, just with newlines preserved)
+            if text and self.detailed_logging:
+                self.raw_data_received.emit(text)
+
+            # Normalize and split into lines; preserve order
+            lines = [ln.strip() for ln in text.replace('\r', '\n').split('\n') if ln.strip()]
+
+            # Return first non-echo, non-prompt line
+            cmd_lower = (command or "").strip().lower()
+            for ln in lines:
+                if not ln:
+                    continue
+                ln_stripped = ln.strip()
+                ln_lower = ln_stripped.lower()
+
+                # Skip prompt lines
+                if ln_stripped in ['>>', '>']:
+                    continue
+
+                # Skip exact echo or simple variations (case-insensitive)
+                if ln_lower == cmd_lower:
+                    continue
+
+                # Skip if the line starts with the command followed by space (e.g. "status ok" echo)
+                if cmd_lower and ln_lower.startswith(cmd_lower + ' '):
+                    # if there's more after the command, that may be real data; only skip if it's pure echo
+                    # e.g., "status" (echo) vs "status 1 2 3" (unlikely). We'll treat a line that is exactly
+                    # the command or starts with command followed by nothing but whitespace as echo; otherwise accept.
+                    suffix = ln_stripped[len(command):].strip()
+                    if not suffix:
+                        continue
+
+                # If we get here, treat ln as the real response
+                return ln_stripped
 
             return None
 
@@ -319,33 +460,55 @@ class SerialWorker(QObject):
         """
         Parse the status command response
         Format: lason vlaser itec vtec rtact iphd ain1 ain2
+        Accepts incomplete packets with at least 6 values (ain1/ain2 optional)
+        Validates ain1/ain2 have full precision (at least 5 decimal places)
         Returns: dict with parsed values or None if parsing failed
         """
         try:
             # Split the response into individual values
             values = response.strip().split()
 
-            if len(values) >= 8:
+            # Accept responses with at least 6 values (core data)
+            # ain1 and ain2 are optional and will be set to None if missing or incomplete
+            if len(values) >= 6:
+                # Helper function to validate analog input precision
+                def parse_analog_input(value_str):
+                    """Parse analog input only if it has full precision (5+ decimal places)"""
+                    try:
+                        # Check if the value has a decimal point and enough digits after it
+                        if '.' in value_str:
+                            decimal_part = value_str.split('.')[1]
+                            # Only accept if we have at least 5 decimal places (full precision)
+                            if len(decimal_part) >= 5:
+                                return float(value_str)
+                        # If no decimal point or fewer than 5 decimal places, reject
+                        return None
+                    except:
+                        return None
+
                 status_dict = {
                     'lason': int(values[0]),           # Laser enable (0 or 1)
                     'vlaser': float(values[1]),        # Laser voltage (V)
-                    'ilaser': 0.0,                     # Placeholder, will be read separately
+                    # ilaser is NOT in status command - read separately, don't include placeholder
                     'itec': float(values[2]) * 1000,   # TEC current (mA)
                     'vtec': float(values[3]),          # TEC voltage (V)
                     'rtact': float(values[4]),         # Thermistor resistance (Ω)
                     'iphd': float(values[5]),          # Photodiode current (mA)
-                    'ain1': float(values[6]),          # Analog input 1 (V)
-                    'ain2': float(values[7]),          # Analog input 2 (V)
+                    'ain1': parse_analog_input(values[6]) if len(values) > 6 else None,  # Analog input 1 (V) - requires full precision
+                    'ain2': parse_analog_input(values[7]) if len(values) > 7 else None,  # Analog input 2 (V) - requires full precision
                 }
 
-                # Read TEC state separately (not included in status command)
-                tecon = self._read_tec_state()
-                if tecon is not None:
-                    status_dict['tecon'] = tecon
+                # Log if we got an incomplete packet or truncated analog inputs (for debugging)
+                if len(values) < 8:
+                    logging.debug(f"Incomplete status packet ({len(values)}/8 values)")
+                elif status_dict['ain1'] is None and len(values) > 6:
+                    logging.debug(f"ain1 rejected (insufficient precision): {values[6]}")
+                elif status_dict['ain2'] is None and len(values) > 7:
+                    logging.debug(f"ain2 rejected (insufficient precision): {values[7]}")
 
                 return status_dict
             else:
-                logging.warning(f"Unexpected status response format: {response}")
+                logging.warning(f"Unexpected status response format ({len(values)} values, need at least 6): {response}")
                 return None
 
         except (ValueError, IndexError) as e:
@@ -371,15 +534,22 @@ class SerialWorker(QObject):
 
             if response:
                 self._log_communication('RX', response)
-                # Try to convert to int
-                return int(response)
+                # Try to convert to int - tecon returns simple 0 or 1
+                try:
+                    tec_state = int(response.strip())
+                    # Validate it's 0 or 1
+                    if tec_state in [0, 1]:
+                        return tec_state
+                    else:
+                        logging.warning(f"Invalid tecon value: {response} (expected 0 or 1)")
+                        return 0
+                except ValueError:
+                    logging.warning(f"Could not parse tecon response as integer: {response}")
+                    return 0
             else:
                 logging.debug("No response from tecon command")
                 return 0
 
-        except ValueError as e:
-            logging.warning(f"Error parsing TEC state: {e}")
-            return 0
         except Exception as e:
             logging.warning(f"Error reading TEC state: {e}")
             return 0
