@@ -33,3 +33,20 @@ userdata 	Read the user data 	R
 brate 	UART baud rate 	R/W 	baud 	115200 	9600 	460800
 err 	Return the error code in hexadecimal format (no argument) 	R
 errclr 	Clear the error code (no argument) 	W
+
+UNDOCUMENTED COMMANDS (Discovered 2025-10-20)
+==============================================
+
+model 	Device model number (e.g. CTL200-0-B-200) 	R 		CTL200-0-B-200
+modelno 	Alias for 'model' command 	R 		CTL200-0-B-200
+modelnumber 	Alias for 'model' command 	R 		CTL200-0-B-200
+calibration 	Factory calibration coefficients for ADC/DAC (READ ONLY - DO NOT MODIFY!) 	R 		291.727509 7.483807
+config 	Read all TEC configuration in one command. Returns: tecon ilaser rtset pgain igain dgain rtmin rtmax vtmin vtmax 	R 		0 0.000 10000.000 0.001000 0.000100 0.001000 5000.000 15000.000 -2.00 2.00
+configuration 	Alias for 'config' command 	R 		0 0.000 10000.000 0.001000 0.000100 0.001000 5000.000 15000.000 -2.00 2.00
+
+NOTES ON UNDOCUMENTED COMMANDS:
+- model/modelno/modelnumber: Returns full device model designation. Format: BASE-REVISION-MAXCURRENT (e.g., CTL200-0-B-200 means CTL200-0 base model, revision B, 200mA max current)
+- calibration: Factory-set ADC/DAC calibration values. These are critical for measurement accuracy. DO NOT attempt to write or modify these values!
+- config/configuration: Quick way to read all TEC controller settings in a single command instead of querying each parameter individually. Very useful for logging or backup purposes.
+- All undocumented commands follow the same protocol: send command with \r terminator, device echoes command, then responds with data, then sends >> prompt
+- These commands were discovered through systematic testing on device S/N 17095 running firmware V0.17

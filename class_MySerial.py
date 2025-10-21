@@ -15,7 +15,7 @@ class MySerial:
     baud = 115200 #115200
     time_out = 0.2
     port = ""
-    boxNamePrefix = "PIXI click driver"
+    boxNamePrefix = "CTL200-0"  # CTL200-0 model prefix for device identification
     name = ""
     boxSettings = False  # have settings from box
     box = None  # serial port object
@@ -24,6 +24,11 @@ class MySerial:
     last_error = ""
     connect_retries = 3
     read_timeout = 1.0  # seconds
+
+    # CTL200-0 specific attributes
+    firmware_version = ""
+    serial_number = ""
+    model_number = ""  # e.g., CTL200-0-B-200
 
     def __init__(self):
         # Setup logging with a basic configuration if not already configured
@@ -149,46 +154,225 @@ class MySerial:
     def _identify_device(self):
         """
         Send identification request and verify device response
+        Uses model command as primary identification (CTL200-0-B-200)
         Returns: True if device identification was successful, False otherwise
         """
-        # Send empty command first to clear any partial commands
-        self.sendToBox("")
-        time.sleep(0.01)
-        
         # Clear any existing data
         self.box.flushInput()
         self.box.flushOutput()
         
-        # Send identification query
-        self.sendToBox("whois?")
-        
+        # Give device time to settle
+        time.sleep(0.1)
+
+        # Send model query - CTL200-0 uses \r (carriage return) not \n
+        try:
+            self.box.write(b"model\r")
+            time.sleep(0.3)  # Give device time to respond
+        except Exception as e:
+            logging.error(f"Error sending model command: {str(e)}")
+            return False
+
         # Try multiple times to get a response
-        max_attempts = 10
+        max_attempts = 3
         for i in range(max_attempts):
-            if i % 5 == 0 and i > 0:
-                self.sendToBox("whois?")  # Resend query every few attempts
-                
+            if i > 0:
+                # Resend query on retry
+                try:
+                    self.box.flushInput()
+                    self.box.write(b"model\r")
+                    time.sleep(0.3)
+                except:
+                    pass
+
             try:
-                # Wait for response with timeout
+                # Read all available lines (device may echo the command first)
+                responses = []
                 start_time = time.time()
-                while self.box.in_waiting == 0:
-                    if time.time() - start_time > self.read_timeout:
-                        logging.warning(f"Timeout waiting for response on attempt {i+1}")
-                        break
-                    time.sleep(0.01)
-                
-                if self.box.in_waiting > 0:
-                    line = self.readLine()
-                    logging.info(f'Attempt {i+1}: Response: {line}')
-                    
-                    # Check if response matches expected device prefix
+
+                while time.time() - start_time < 0.6:
+                    if self.box.in_waiting > 0:
+                        line = self.box.readline()
+                        try:
+                            decoded = line.decode("ascii").rstrip("\r\n")
+                            if decoded:  # Only add non-empty lines
+                                responses.append(decoded)
+                                logging.info(f'Attempt {i+1}: Received: {decoded}')
+                        except UnicodeDecodeError:
+                            logging.warning(f"Failed to decode response: {line}")
+                    else:
+                        time.sleep(0.01)
+
+                # Look for model string in responses (skip echo and prompt)
+                for line in responses:
+                    # Skip if it's just the echo of our command or the prompt
+                    if line.lower().strip() in ["model", ">>", ">"]:
+                        continue
+
+                    # Check if response matches expected model prefix (CTL200-0)
                     if line and line.startswith(self.boxNamePrefix):
-                        self.name = line
+                        self.model_number = line
+                        self.name = line  # Start with just the model
+
+                        # Try to get firmware version
+                        firmware = self._get_firmware_version()
+                        if firmware:
+                            self.firmware_version = firmware
+                            self.name = f"{line} (FW: {firmware})"
+
+                        # Try to get serial number
+                        serial_num = self._get_device_serial()
+                        if serial_num:
+                            self.serial_number = serial_num
+                            if firmware:
+                                self.name = f"{line} (FW: {firmware}, S/N: {serial_num})"
+                            else:
+                                self.name = f"{line} (S/N: {serial_num})"
+
+                        # Try to get userdata (may contain device name/info)
+                        userdata = self._get_device_userdata()
+                        if userdata:
+                            if firmware and serial_num:
+                                self.name = f"{line} (FW: {firmware}, S/N: {serial_num}, {userdata})"
+                            elif serial_num:
+                                self.name = f"{line} (S/N: {serial_num}, {userdata})"
+                            else:
+                                self.name = f"{line} ({userdata})"
+
                         return True
+
             except Exception as e:
                 logging.error(f"Error during device identification: {str(e)}")
-                
+
+        logging.warning(f"No valid model response found after {max_attempts} attempts")
         return False
+
+    def _get_firmware_version(self):
+        """
+        Get the firmware version
+        Returns: Firmware version string or None if not available
+        """
+        try:
+            self.box.flushInput()
+            self.box.write(b"version\r")
+            time.sleep(0.3)
+
+            # Read version response (may have echo and prompt)
+            responses = []
+            start_time = time.time()
+            while time.time() - start_time < 0.4:
+                if self.box.in_waiting > 0:
+                    line = self.box.readline().decode("ascii").rstrip("\r\n")
+                    if line:
+                        responses.append(line)
+                else:
+                    time.sleep(0.01)
+
+            # Filter out echo, prompt, and empty lines
+            for line in responses:
+                if line.lower().strip() not in ["version", ">>", ">", ""] and line.startswith("V"):
+                    logging.info(f"Firmware version: {line}")
+                    return line
+
+        except Exception as e:
+            logging.warning(f"Could not get firmware version: {e}")
+
+        return None
+
+    def _get_device_serial(self):
+        """
+        Get the device serial number
+        Returns: Serial number string or None if not available
+        """
+        try:
+            self.box.flushInput()
+            self.box.write(b"serial\r")
+            time.sleep(0.3)
+
+            # Read serial response (may have echo and prompt)
+            responses = []
+            start_time = time.time()
+            while time.time() - start_time < 0.4:
+                if self.box.in_waiting > 0:
+                    line = self.box.readline().decode("ascii").rstrip("\r\n")
+                    if line:
+                        responses.append(line)
+                else:
+                    time.sleep(0.01)
+
+            # Filter out echo, prompt, and empty lines
+            for line in responses:
+                if line.lower().strip() not in ["serial", ">>", ">", ""]:
+                    logging.info(f"Device serial number: {line}")
+                    return line
+
+        except Exception as e:
+            logging.warning(f"Could not get serial number: {e}")
+
+        return None
+
+    def _get_device_model(self):
+        """
+        Get the device model number
+        Returns: Model number string or None if not available
+        """
+        try:
+            self.box.flushInput()
+            self.box.write(b"model\r")
+            time.sleep(0.3)
+
+            # Read model response (may have echo and prompt)
+            responses = []
+            start_time = time.time()
+            while time.time() - start_time < 0.4:
+                if self.box.in_waiting > 0:
+                    line = self.box.readline().decode("ascii").rstrip("\r\n")
+                    if line:
+                        responses.append(line)
+                else:
+                    time.sleep(0.01)
+
+            # Filter out echo, prompt, and empty lines
+            for line in responses:
+                if line.lower().strip() not in ["model", ">>", ">", ""]:
+                    logging.info(f"Device model number: {line}")
+                    return line
+
+        except Exception as e:
+            logging.debug(f"Could not get model number: {e}")
+
+        return None
+
+    def _get_device_userdata(self):
+        """
+        Get the device userdata (user-defined identification string)
+        Returns: Userdata string or None if not available
+        """
+        try:
+            self.box.flushInput()
+            self.box.write(b"userdata\r")
+            time.sleep(0.3)
+
+            # Read userdata response
+            responses = []
+            start_time = time.time()
+            while time.time() - start_time < 0.4:
+                if self.box.in_waiting > 0:
+                    line = self.box.readline().decode("ascii").rstrip("\r\n")
+                    if line:
+                        responses.append(line)
+                else:
+                    time.sleep(0.01)
+
+            # Filter out echo, prompt, and empty lines
+            for line in responses:
+                if line.lower().strip() not in ["userdata", ">>", ">", ""]:
+                    logging.info(f"Device userdata: {line}")
+                    return line
+
+        except Exception as e:
+            logging.debug(f"Could not get userdata: {e}")
+
+        return None
 
     def readLine(self):
         """
@@ -222,6 +406,7 @@ class MySerial:
     def sendToBox(self, stri):
         """
         Send string to the box with error handling
+        CTL200-0 uses \r (carriage return) as line terminator
         Returns: Number of bytes written or 0 on error
         """
         if not self.is_connected():
@@ -230,7 +415,7 @@ class MySerial:
             return 0
             
         try:
-            stri = (stri+"\n").encode('utf-8')
+            stri = (stri+"\r").encode('utf-8')
             bytes_written = self.box.write(stri)
             return bytes_written
         except serial.SerialException as e:

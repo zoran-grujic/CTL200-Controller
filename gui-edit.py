@@ -16,4 +16,6 @@ git rm --cached gui-edit.py
 import os
 # Update path to use Qt6 Designer from the Python 3.12 environment
 cmd = "START C:\\Users\\Zoran\\AppData\\Roaming\\Python\\Python312\\Scripts\\designer.exe gui.ui"
+cmd='"C:\\Program Files (x86)\\Qt Designer\\designer.exe" gui.ui'
+
 os.system(cmd)

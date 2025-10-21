@@ -1,0 +1,139 @@
+"""
+CTL200-0 Complete Command Reference
+====================================
+
+Your Device: CTL200-0-B-200
+Firmware: V0.17
+Serial Number: 17095
+Port: COM4
+
+UNDOCUMENTED COMMANDS DISCOVERED
+=================================
+
+1. model / modelno / modelnumber
+   Type: Read-only
+   Returns: CTL200-0-B-200
+   Description: Full model designation
+   - CTL200-0 = Base model (laser diode controller)
+   - B = Variant/revision
+   - 200 = Maximum laser current in mA
+
+2. calibration
+   Type: Read-only
+   Returns: 291.727509 7.483807
+   Description: Factory calibration coefficients for ADC/DAC
+   WARNING: Do not attempt to modify these values!
+
+3. config / configuration
+   Type: Read-only
+   Returns: All TEC configuration in one line
+   Format: tecon ilaser rtset pgain igain dgain rtmin rtmax vtmin vtmax
+   Example: 0 0.000 10000.000 0.001000 0.000100 0.001000 5000.000 15000.000 -2.00 2.00
+
+   Parsed values:
+   - tecon: 0 (TEC disabled)
+   - ilaser: 0.000 mA
+   - rtset: 10000.000 Ω (thermistor setpoint)
+   - pgain: 0.001000 (proportional gain)
+   - igain: 0.000100 (integral gain)
+   - dgain: 0.001000 (derivative gain)
+   - rtmin: 5000.000 Ω
+   - rtmax: 15000.000 Ω
+   - vtmin: -2.00 V
+   - vtmax: 2.00 V
+
+DOCUMENTED COMMANDS (from manual)
+==================================
+
+IDENTIFICATION COMMANDS:
+- version        → Firmware version (V0.17)
+- serial         → Serial number (17095)
+- userdata       → User-defined data (31 chars max)
+- userdata write → Set user data (e.g., "userdata write MyDevice")
+
+STATUS COMMANDS:
+- status         → Returns: lason, vlaser, itec, vtec, rtact, iphd, ain1, ain2
+- err            → Error code in hexadecimal
+- errclr         → Clear error code
+- tboard         → Board temperature (°C)
+
+LASER CONTROL:
+- lason          → Enable/disable laser (0/1)
+- ilaser         → Laser current (mA) - read/write
+- vlaser         → Laser voltage (V) - read-only
+- ilmax          → Software current limit (mA)
+- ldelay         → Startup delay (ms, 10-100000)
+- lckon          → Interlock enable/disable (0/1)
+- lmodgain       → Laser current modulation gain (mA/V)
+
+TEC CONTROL:
+- tecon          → Enable/disable TEC (0/1)
+- tprot          → Temperature protection (0/1)
+- rtset          → Thermistor resistance setpoint (Ω)
+- rtact          → Actual thermistor resistance (Ω) - read-only
+- itec           → TEC current (A) - read-only
+- vtec           → TEC voltage (V) - read-only
+- rtmin          → Minimum resistance (Ω)
+- rtmax          → Maximum resistance (Ω)
+- vtmin          → Minimum TEC voltage (V)
+- vtmax          → Maximum TEC voltage (V)
+- tmodgain       → Temperature modulation gain (Ω/V)
+
+PID TUNING:
+- pgain          → Proportional gain (0.0-0.1)
+- igain          → Integral gain (0.0-0.1)
+- dgain          → Derivative gain (0.0-0.1)
+
+ANALOG INPUTS:
+- iphd           → Photodiode current (mA) - read-only
+- ain1           → Analog input 1 voltage (V) - read-only
+- ain2           → Analog input 2 voltage (V) - read-only
+
+SYSTEM:
+- save           → Save configuration to memory
+- brate          → UART baud rate (9600-460800)
+
+COMMAND FORMAT:
+===============
+- Line terminator: \r (carriage return, not \n)
+- Baud rate: 115200
+- Read command: Just send the command name
+- Write command: Send "command value" (e.g., "ilaser 50.0")
+- Device echoes commands before responding
+- Prompt: >> (after each command)
+
+EXAMPLES:
+=========
+Read version:
+  Send: "version\r"
+  Receive: "version", "V0.17", ">>"
+
+Set laser current to 50mA:
+  Send: "ilaser 50.0\r"
+  Receive: "ilaser 50.0", ">>"
+
+Read status:
+  Send: "status\r"
+  Receive: "status", "0, 0.00085, 0.4330, -1.8306, 8409.164, 0.00001, 1.84234, 1.96368", ">>"
+
+SAFETY NOTES:
+=============
+- Always check 'err' before and after operations
+- Use 'tprot 1' to enable temperature protection
+- Set appropriate 'ilmax' before enabling laser
+- Monitor 'rtact' to ensure temperature is stable
+- Save configuration with 'save' after changes
+- Never modify 'calibration' values!
+
+BEST PRACTICES:
+===============
+1. Use 'model' instead of parsing 'version' for device type detection
+2. Use 'config' to quickly read all TEC settings in one command
+3. Use 'status' for periodic monitoring (includes most important parameters)
+4. Always wait 300ms after sending a command before reading response
+5. Filter out command echoes and ">>" prompts from responses
+6. Enable temperature protection ('tprot 1') before enabling laser
+7. Set current limit ('ilmax') before setting actual current ('ilaser')
+8. Use 'save' to persist settings across power cycles
+"""
+
