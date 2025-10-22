@@ -96,6 +96,10 @@ class SerialWorker(QObject):
         # Can be enabled via UI toggle for debugging
         self.detailed_logging = False
 
+        # Connection loss detection
+        self.no_response_count = 0
+        self.no_response_threshold = 10  # Trigger connection lost after 10 consecutive no responses
+
     def _log_communication(self, direction, message):
         """
         Log communication with timestamp
@@ -176,6 +180,9 @@ class SerialWorker(QObject):
                 if response:
                     self._log_communication('RX', response)
 
+                    # Reset no response counter on successful response
+                    self.no_response_count = 0
+
                     # Parse the status response
                     status_data = self._parse_status_response(response)
 
@@ -208,6 +215,26 @@ class SerialWorker(QObject):
                                 logging.warning(f"Error reading tecon: {e}")
                 else:
                     logging.warning("No response from status command")
+                    self.no_response_count += 1
+
+                    # Check if we've exceeded the threshold for connection loss
+                    if self.no_response_count >= self.no_response_threshold:
+                        logging.error(f"Connection lost: {self.no_response_count} consecutive failed status commands")
+                        # Close the serial port
+                        try:
+                            if hasattr(self.serial_device, 'disconnect'):
+                                self.serial_device.disconnect()
+                            elif hasattr(self.serial_device, 'box') and self.serial_device.box:
+                                self.serial_device.box.close()
+                        except Exception as e:
+                            logging.error(f"Error closing serial port: {e}")
+
+                        # Emit error signal to trigger reconnection prompt
+                        self.error_occurred.emit("Device not connected")
+                        # Reset counter to prevent repeated errors
+                        self.no_response_count = 0
+                        # Stop polling
+                        self.running = False
 
             except Exception as e:
                 error_msg = f"Error reading device status: {str(e)}"

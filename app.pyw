@@ -25,6 +25,54 @@ from toggle_switch import LaserToggle, TECToggle
 from QtWorker import SerialWorker
 
 
+class ConnectionWorker(QtCore.QObject):
+    """Worker class for handling serial connection in a separate thread"""
+    connection_success = QtCore.pyqtSignal()
+    connection_failed = QtCore.pyqtSignal()
+    status_message = QtCore.pyqtSignal(str)
+    finished = QtCore.pyqtSignal()
+
+    def __init__(self, serial_device, config):
+        super().__init__()
+        self.serial_device = serial_device
+        self.config = config
+
+    def connect_device(self):
+        """Attempt to connect to the device (runs in separate thread)"""
+        try:
+            self.status_message.emit("Status: Searching for CTL200-0...")
+
+            # Try last known port first if available
+            last_port = self.config.get_last_port()
+            if last_port:
+                self.status_message.emit(f"ℹ Trying last known port: {last_port}")
+                self.serial_device.port = last_port
+                success = self.serial_device.connect()
+
+                if success:
+                    self.connection_success.emit()
+                    self.finished.emit()
+                    return
+                else:
+                    self.status_message.emit(f"ℹ Last port {last_port} failed, scanning all ports...")
+                    self.serial_device.port = ""  # Clear to scan all ports
+
+            # Try to connect (will auto-scan all ports)
+            self.status_message.emit("Status: Scanning serial ports...")
+            success = self.serial_device.connect()
+
+            if success:
+                self.connection_success.emit()
+            else:
+                self.connection_failed.emit()
+
+        except Exception as e:
+            self.status_message.emit(f"✗ Exception during auto-connect: {e}")
+            self.connection_failed.emit()
+        finally:
+            self.finished.emit()
+
+
 class MyUi(Ui_MainWindow):
     """
     CTL200-0 Laser Controller UI
@@ -56,6 +104,10 @@ class MyUi(Ui_MainWindow):
         # Worker thread for serial communication
         self.serial_thread = None
         self.serial_worker = None
+
+        # Reconnection dialog tracking
+        self.reconnection_dialog_shown = False
+        self.is_reconnecting = False
 
         # Data for temperature plot using deques for efficient data management
         self.temperature_R = collections.deque(maxlen=500)
@@ -243,6 +295,12 @@ class MyUi(Ui_MainWindow):
         # Connect save settings button
         self.pushButton_SaveSettings.clicked.connect(self.on_save_settings_clicked)
 
+        # Connect the connect/disconnect button
+        if hasattr(self, 'pushButton_connectDisconnect'):
+            self.pushButton_connectDisconnect.clicked.connect(self.on_connect_disconnect_clicked)
+            self.pushButton_connectDisconnect.setText("Disconnect")  # Initial state - will try to connect
+            self.pushButton_connectDisconnect.setEnabled(False)  # Disabled until initial connection attempt completes
+
 
         # Communication log batching for performance
         self._log_buffer = []
@@ -261,7 +319,7 @@ class MyUi(Ui_MainWindow):
         MainWindow.setWindowTitle("CTL200-0 Laser Controller")
 
         # Start with Serial Connection tab active (will switch to Laser after connection)
-        self.tabWidget.setCurrentIndex(2)  # Index 1 is Serial Connection tab
+        self.tabWidget.setCurrentIndex(1)  # Index 1 is Serial Connection tab
 
         # Plot some example data
         self.plot_example_data()
@@ -273,38 +331,31 @@ class MyUi(Ui_MainWindow):
         MainWindow.closeEvent = self.closeEvent
 
     def auto_connect_device(self):
-        """Automatically connect to CTL200-0 device on startup"""
-        try:
-            self.label_status.setText("Status: Searching for CTL200-0...")
+        """Automatically connect to CTL200-0 device on startup (runs in separate thread)"""
+        self.label_status.setText("Status: Searching for CTL200-0...")
 
-            # Try last known port first if available
-            last_port = self.config.get_last_port()
-            if last_port:
-                print(f"ℹ Trying last known port: {last_port}")
-                self.my_serial.port = last_port
-                success = self.my_serial.connect()
+        # Create a connection thread to avoid blocking GUI
+        self.connection_thread = QtCore.QThread()
+        self.connection_worker = ConnectionWorker(self.my_serial, self.config)
+        self.connection_worker.moveToThread(self.connection_thread)
 
-                if success:
-                    self._on_connection_success()
-                    return
-                else:
-                    print(f"ℹ Last port {last_port} failed, scanning all ports...")
-                    self.my_serial.port = ""  # Clear to scan all ports
+        # Connect signals
+        self.connection_worker.connection_success.connect(self._on_connection_success)
+        self.connection_worker.connection_failed.connect(self._on_connection_failure)
+        self.connection_worker.status_message.connect(self._update_connection_status)
 
-            # Try to connect (will auto-scan all ports)
-            success = self.my_serial.connect()
+        # Start connection in separate thread
+        self.connection_thread.started.connect(self.connection_worker.connect_device)
+        self.connection_worker.finished.connect(self.connection_thread.quit)
+        self.connection_worker.finished.connect(self.connection_worker.deleteLater)
+        self.connection_thread.finished.connect(self.connection_thread.deleteLater)
 
-            if success:
-                self._on_connection_success()
-            else:
-                self._on_connection_failure()
+        self.connection_thread.start()
 
-        except Exception as e:
-            self.label_status.setText("Status: Connection error")
-            self.label_SerialPort.setText("Error")
-            self.label_Status.setText(str(e))
-            self.textEdit_SerialPort.setText(f"Connection Error:\n\n{str(e)}")
-            print(f"✗ Exception during auto-connect: {e}")
+    def _update_connection_status(self, message):
+        """Update connection status message from worker thread"""
+        self.label_status.setText(message)
+        print(message)
 
     def _on_connection_success(self):
         """Handle successful connection"""
@@ -385,6 +436,11 @@ Device is ready for operation.
         self.doubleSpinBox_I.setEnabled(True)
         self.doubleSpinBox_D.setEnabled(True)
 
+        # Update connect/disconnect button state
+        if hasattr(self, 'pushButton_connectDisconnect'):
+            self.pushButton_connectDisconnect.setText("Disconnect")
+            self.pushButton_connectDisconnect.setEnabled(True)
+
         # Check if config file exists and apply settings
         QtCore.QTimer.singleShot(500, lambda: self._apply_config_settings_on_startup())
 
@@ -417,6 +473,11 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
 
         print(f"✗ Failed to connect to CTL200-0 device")
         print(f"✗ Last error: {self.my_serial.last_error}")
+
+        # Update connect/disconnect button to show "Connect CTL200"
+        if hasattr(self, 'pushButton_connectDisconnect'):
+            self.pushButton_connectDisconnect.setText("Connect CTL200")
+            self.pushButton_connectDisconnect.setEnabled(True)
 
     def _apply_config_settings_on_startup(self):
         """Check if config file exists and apply settings to device on startup"""
@@ -707,6 +768,172 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
         print(f"✗ Worker error: {error_msg}")
         if hasattr(self, 'statusbar'):
             self.statusbar.showMessage(f"Error: {error_msg}", 5000)
+
+        # Check if this is a connection lost error
+        if "not connected" in error_msg.lower() or "connection lost" in error_msg.lower():
+            self._handle_connection_lost()
+
+    def _handle_connection_lost(self):
+        """Handle connection lost - show reconnection dialog"""
+        # Prevent multiple dialogs from appearing
+        if self.reconnection_dialog_shown or self.is_reconnecting:
+            return
+
+        self.reconnection_dialog_shown = True
+
+        # Stop the status polling thread
+        self._stop_status_polling()
+
+        # Show reconnection dialog
+        reply = QtWidgets.QMessageBox.question(
+            self.main_window,
+            'Connection Lost',
+            'Connection to CTL200 lost. Reconnect?',
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.Yes
+        )
+
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            print("ℹ User chose to reconnect...")
+            self.is_reconnecting = True
+
+            # Switch to Serial Connection tab (index 1)
+            self.tabWidget.setCurrentIndex(1)
+
+            # Update status
+            self.label_status.setText("Status: Reconnecting...")
+            self.textEdit_SerialPort.append('<span style="color: #FFA500;">--- Attempting to reconnect... ---</span>')
+
+            # Attempt reconnection in separate thread
+            self._attempt_reconnection()
+        else:
+            print("ℹ User chose not to reconnect")
+            self.label_status.setText("Status: Disconnected")
+            self.reconnection_dialog_shown = False
+
+            # Update button to show "Connect CTL200"
+            if hasattr(self, 'pushButton_connectDisconnect'):
+                self.pushButton_connectDisconnect.setText("Connect CTL200")
+                self.pushButton_connectDisconnect.setEnabled(True)
+
+    def _attempt_reconnection(self):
+        """Attempt to reconnect to the device"""
+        # Create a reconnection thread
+        self.reconnection_thread = QtCore.QThread()
+        self.reconnection_worker = ConnectionWorker(self.my_serial, self.config)
+        self.reconnection_worker.moveToThread(self.reconnection_thread)
+
+        # Connect signals
+        self.reconnection_worker.connection_success.connect(self._on_reconnection_success)
+        self.reconnection_worker.connection_failed.connect(self._on_reconnection_failed)
+        self.reconnection_worker.status_message.connect(self._update_connection_status)
+
+        # Start reconnection in separate thread
+        self.reconnection_thread.started.connect(self.reconnection_worker.connect_device)
+        self.reconnection_worker.finished.connect(self.reconnection_thread.quit)
+        self.reconnection_worker.finished.connect(self.reconnection_worker.deleteLater)
+        self.reconnection_thread.finished.connect(self.reconnection_thread.deleteLater)
+
+        self.reconnection_thread.start()
+
+    def _on_reconnection_success(self):
+        """Handle successful reconnection"""
+        print("✓ Reconnection successful!")
+        self.is_reconnecting = False
+        self.reconnection_dialog_shown = False
+
+        # Call the standard connection success handler
+        self._on_connection_success()
+
+        # Show success message
+        QtWidgets.QMessageBox.information(
+            self.main_window,
+            'Reconnection Successful',
+            'Successfully reconnected to CTL200-0!',
+            QtWidgets.QMessageBox.StandardButton.Ok
+        )
+
+    def _on_reconnection_failed(self):
+        """Handle failed reconnection"""
+        print("✗ Reconnection failed")
+        self.is_reconnecting = False
+        self.reconnection_dialog_shown = False
+
+        # Show failure message and ask to retry
+        reply = QtWidgets.QMessageBox.question(
+            self.main_window,
+            'Reconnection Failed',
+            'Failed to reconnect to CTL200-0. Try again?',
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            QtWidgets.QMessageBox.StandardButton.Yes
+        )
+
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            # Retry reconnection
+            QtCore.QTimer.singleShot(500, self._attempt_reconnection)
+        else:
+            self.label_status.setText("Status: Disconnected")
+            self._on_connection_failure()
+
+    def on_connect_disconnect_clicked(self):
+        """Handle connect/disconnect button click"""
+        button_text = self.pushButton_connectDisconnect.text()
+
+        if button_text == "Connect CTL200":
+            # User wants to connect
+            print("ℹ User clicked Connect button")
+            self.pushButton_connectDisconnect.setEnabled(False)  # Disable during connection attempt
+
+            # Switch to Serial Connection tab (index 1)
+            self.tabWidget.setCurrentIndex(1)
+
+            # Update status
+            self.label_status.setText("Status: Connecting...")
+            self.textEdit_SerialPort.append('<span style="color: #FFA500;">--- Attempting to connect... ---</span>')
+
+            # Reset reconnection flags
+            self.reconnection_dialog_shown = False
+            self.is_reconnecting = False
+
+            # Attempt connection in separate thread
+            self.auto_connect_device()
+
+        elif button_text == "Disconnect":
+            # User wants to disconnect
+            print("ℹ User clicked Disconnect button")
+
+            # Ask for confirmation
+            reply = QtWidgets.QMessageBox.question(
+                self.main_window,
+                'Disconnect Device',
+                'Are you sure you want to disconnect from CTL200-0?',
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No
+            )
+
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                # Stop polling
+                self._stop_status_polling()
+
+                # Disconnect the device
+                if self.my_serial.is_connected():
+                    try:
+                        # Turn off laser for safety
+                        self.my_serial.sendToBox("lason 0")
+                        time.sleep(0.2)
+                        print("✓ Laser turned OFF (safety)")
+                    except:
+                        pass
+
+                    self.my_serial.disconnect()
+                    print("✓ Disconnected from device")
+
+                # Update UI
+                self.label_status.setText("Status: Disconnected")
+                self.pushButton_connectDisconnect.setText("Connect CTL200")
+
+                # Switch to Serial Connection tab
+                self.tabWidget.setCurrentIndex(1)
 
     def _handle_command_completed(self, command, success, response):
         """Handle command completion signal from worker thread"""
