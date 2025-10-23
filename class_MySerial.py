@@ -8,6 +8,7 @@ import glob
 import logging
 import time
 import traceback
+import threading
 
 
 class MySerial:
@@ -37,6 +38,9 @@ class MySerial:
                 level=logging.INFO,
                 format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
             )
+
+        # Thread lock to prevent concurrent serial access
+        self._serial_lock = threading.Lock()
 
     def connect(self):
         """
@@ -310,37 +314,6 @@ class MySerial:
 
         return None
 
-    def _get_device_model(self):
-        """
-        Get the device model number
-        Returns: Model number string or None if not available
-        """
-        try:
-            self.box.flushInput()
-            self.box.write(b"model\r")
-            time.sleep(0.3)
-
-            # Read model response (may have echo and prompt)
-            responses = []
-            start_time = time.time()
-            while time.time() - start_time < 0.4:
-                if self.box.in_waiting > 0:
-                    line = self.box.readline().decode("ascii").rstrip("\r\n")
-                    if line:
-                        responses.append(line)
-                else:
-                    time.sleep(0.01)
-
-            # Filter out echo, prompt, and empty lines
-            for line in responses:
-                if line.lower().strip() not in ["model", ">>", ">", ""]:
-                    logging.info(f"Device model number: {line}")
-                    return line
-
-        except Exception as e:
-            logging.debug(f"Could not get model number: {e}")
-
-        return None
 
     def _get_device_userdata(self):
         """
@@ -402,6 +375,109 @@ class MySerial:
             self.last_error = f"Error reading from serial port: {str(e)}"
             logging.error(self.last_error)
             return ""
+
+    def read_binary_state(self, command, timeout=0.5):
+        """
+        Read a binary state command (like lason or tecon) that returns only "0" or "1"
+        Ignores all responses that are not "0" or "1" (echoes, prompts, errors, etc.)
+
+        Thread-safe with lock to prevent concurrent serial access.
+
+        Handles device behavior:
+        - Device echoes the command
+        - Response comes on the next line (or sometimes merged)
+        - Prompt ">>" may appear before or after
+
+        Args:
+            command: The command to send (e.g., "lason" or "tecon")
+            timeout: Maximum time to wait for valid response (seconds)
+
+        Returns:
+            0 or 1 if valid response found, None if no valid response
+        """
+        if not self.is_connected():
+            self.last_error = "Cannot read: Not connected"
+            logging.warning(self.last_error)
+            return None
+
+        # Use lock to prevent concurrent serial access
+        with self._serial_lock:
+            try:
+                # Flush input buffer to clear any stale data
+                self.box.flushInput()
+                time.sleep(0.02)  # Small delay after flush
+
+                # Send the command
+                self.sendToBox(command)
+
+                # Collect all response lines within timeout period
+                start_time = time.time()
+                responses = []
+
+                while time.time() - start_time < timeout:
+                    # Wait for data to arrive
+                    if self.box.in_waiting > 0:
+                        # Read raw bytes with small timeout to get complete line
+                        try:
+                            line = self.box.readline()
+                            if line:
+                                decoded = line.decode("ascii", errors='ignore').strip()
+                                if decoded:
+                                    responses.append(decoded)
+                                    logging.debug(f"{command} received line: '{decoded}'")
+                        except Exception as e:
+                            logging.warning(f"Error reading line: {e}")
+                            continue
+                    else:
+                        # If we have at least one response, wait a bit more for additional data
+                        if responses:
+                            time.sleep(0.05)
+                            # If still no more data, we're done
+                            if self.box.in_waiting == 0:
+                                break
+                        else:
+                            time.sleep(0.02)
+
+                # Parse responses to find valid "0" or "1"
+                for line in responses:
+                    # Clean up the line - remove prompts and whitespace
+                    cleaned = line.replace('>>', '').replace('>', '').strip()
+
+                    # Skip empty lines after cleaning
+                    if not cleaned:
+                        continue
+
+                    # Skip exact command echo
+                    if cleaned.lower() == command.lower():
+                        continue
+
+                    # IMPORTANT: Reject fragments from status command (contains spaces/multiple values)
+                    # Status returns: "lason vlaser itec vtec rtact iphd ain1 ain2"
+                    # Fragments look like: "603 1.58494", "9086", "1.59576"
+                    if ' ' in cleaned or '.' in cleaned:
+                        # If it contains space or decimal point, it's likely a status fragment
+                        logging.debug(f"{command} rejecting status fragment: '{cleaned}'")
+                        continue
+
+                    # Check if response is exactly "0" or "1"
+                    if cleaned == "0":
+                        logging.debug(f"{command} -> 0")
+                        return 0
+                    elif cleaned == "1":
+                        logging.debug(f"{command} -> 1")
+                        return 1
+
+                    # Log unexpected responses that don't match
+                    logging.debug(f"{command} ignoring invalid response: '{cleaned}'")
+
+                # No valid response found
+                logging.warning(f"{command}: no valid response after {timeout}s (got {len(responses)} lines)")
+                return None
+
+            except Exception as e:
+                self.last_error = f"Error reading {command}: {str(e)}"
+                logging.error(self.last_error)
+                return None
 
     def sendToBox(self, stri):
         """

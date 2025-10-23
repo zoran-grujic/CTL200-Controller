@@ -321,9 +321,6 @@ class MyUi(Ui_MainWindow):
         # Start with Serial Connection tab active (will switch to Laser after connection)
         self.tabWidget.setCurrentIndex(1)  # Index 1 is Serial Connection tab
 
-        # Plot some example data
-        self.plot_example_data()
-
         # Auto-connect to CTL200-0 device
         QtCore.QTimer.singleShot(500, self.auto_connect_device)
 
@@ -441,15 +438,16 @@ Device is ready for operation.
             self.pushButton_connectDisconnect.setText("Disconnect")
             self.pushButton_connectDisconnect.setEnabled(True)
 
-        # Check if config file exists and apply settings
-        QtCore.QTimer.singleShot(500, lambda: self._apply_config_settings_on_startup())
+        # Sequence initialization to prevent response collisions:
+        # 1. Apply config settings at 300ms
+        QtCore.QTimer.singleShot(300, lambda: self._apply_config_settings_on_startup())
 
-        # Auto-enable TEC on startup (after settings are applied)
+        # 2. Auto-enable TEC at 1200ms (after config is applied)
         print("ℹ Auto-enabling TEC on startup...")
-        QtCore.QTimer.singleShot(1500, lambda: self._auto_enable_tec())
+        QtCore.QTimer.singleShot(1200, lambda: self._auto_enable_tec())
 
-        # Start the worker thread for periodic status updates
-        self._start_status_polling()
+        # 3. Start status polling at 1800ms (after all initialization is complete)
+        QtCore.QTimer.singleShot(1800, lambda: self._start_status_polling())
 
     def _on_connection_failure(self):
         """Handle connection failure"""
@@ -498,12 +496,19 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             # Apply settings to device with small delays between commands
             settings_applied = []
 
+            # Helper function to send command and clear response
+            def send_and_clear(cmd, label):
+                self.my_serial.sendToBox(cmd)
+                time.sleep(0.15)  # Wait for device to respond
+                # Clear the response to prevent buffer buildup
+                if self.my_serial.box and self.my_serial.box.in_waiting > 0:
+                    self.my_serial.box.flushInput()
+                settings_applied.append(label)
+
             # Apply laser current (ilaser)
             if 'ilaser' in laser_config:
                 ilaser = laser_config['ilaser']
-                self.my_serial.sendToBox(f"ilaser {ilaser:.6f}")
-                time.sleep(0.05)
-                settings_applied.append(f"ilaser={ilaser:.3f}mA")
+                send_and_clear(f"ilaser {ilaser:.6f}", f"ilaser={ilaser:.3f}mA")
                 # Update UI
                 self.doubleSpinBox_LaserCurrent.blockSignals(True)
                 self.doubleSpinBox_LaserCurrent.setValue(ilaser)
@@ -512,16 +517,12 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             # Apply laser max current (ilmax) if present
             if 'ilmax' in laser_config:
                 ilmax = laser_config['ilmax']
-                self.my_serial.sendToBox(f"ilmax {ilmax:.6f}")
-                time.sleep(0.05)
-                settings_applied.append(f"ilmax={ilmax:.3f}mA")
+                send_and_clear(f"ilmax {ilmax:.6f}", f"ilmax={ilmax:.3f}mA")
 
             # Apply temperature setpoint (rtset)
             if 'rtset' in tec_config:
                 rtset = tec_config['rtset']
-                self.my_serial.sendToBox(f"rtset {rtset:.6f}")
-                time.sleep(0.05)
-                settings_applied.append(f"rtset={rtset:.3f}Ω")
+                send_and_clear(f"rtset {rtset:.6f}", f"rtset={rtset:.3f}Ω")
                 # Update UI
                 self.doubleSpinBox_SetTemperature.blockSignals(True)
                 self.doubleSpinBox_SetTemperature.setValue(rtset)
@@ -530,9 +531,7 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             # Apply PID gains
             if 'pgain' in tec_config:
                 pgain = tec_config['pgain']
-                self.my_serial.sendToBox(f"pgain {pgain:.6f}")
-                time.sleep(0.05)
-                settings_applied.append(f"pgain={pgain:.6f}")
+                send_and_clear(f"pgain {pgain:.6f}", f"pgain={pgain:.6f}")
                 # Update UI
                 self.doubleSpinBox_P.blockSignals(True)
                 self.doubleSpinBox_P.setValue(pgain)
@@ -540,9 +539,7 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
 
             if 'igain' in tec_config:
                 igain = tec_config['igain']
-                self.my_serial.sendToBox(f"igain {igain:.6f}")
-                time.sleep(0.05)
-                settings_applied.append(f"igain={igain:.6f}")
+                send_and_clear(f"igain {igain:.6f}", f"igain={igain:.6f}")
                 # Update UI
                 self.doubleSpinBox_I.blockSignals(True)
                 self.doubleSpinBox_I.setValue(igain)
@@ -550,9 +547,7 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
 
             if 'dgain' in tec_config:
                 dgain = tec_config['dgain']
-                self.my_serial.sendToBox(f"dgain {dgain:.6f}")
-                time.sleep(0.05)
-                settings_applied.append(f"dgain={dgain:.6f}")
+                send_and_clear(f"dgain {dgain:.6f}", f"dgain={dgain:.6f}")
                 # Update UI
                 self.doubleSpinBox_D.blockSignals(True)
                 self.doubleSpinBox_D.setValue(dgain)
@@ -561,9 +556,7 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             # Apply temperature protection (tprot) if present
             if 'tprot' in tec_config:
                 tprot = tec_config['tprot']
-                self.my_serial.sendToBox(f"tprot {tprot}")
-                time.sleep(0.05)
-                settings_applied.append(f"tprot={tprot}")
+                send_and_clear(f"tprot {tprot}", f"tprot={tprot}")
 
             print(f"✓ Settings applied: {', '.join(settings_applied)}")
 
@@ -580,25 +573,24 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
         try:
             # Read tecon state to sync UI (lason is already in status command)
             print("ℹ Reading TEC state from device...")
-            self.my_serial.sendToBox("tecon")
-            time.sleep(0.05)
-            tecon_response = self.my_serial.readLine()
-            if tecon_response:
-                try:
-                    tecon_state = int(tecon_response.strip())
-                    print(f"ℹ Current tecon state: {tecon_state}")
-                    # Sync TEC toggle with actual state
-                    self.tec_toggle.blockSignals(True)
-                    self.tec_toggle.setChecked(tecon_state == 1)
-                    self.tec_toggle.blockSignals(False)
-                except ValueError:
-                    print(f"⚠ Could not parse tecon response: {tecon_response}")
+            tecon_state = self.my_serial.read_binary_state("tecon")
+            if tecon_state is not None:
+                print(f"ℹ Current tecon state: {tecon_state}")
+                # Sync TEC toggle with actual state
+                self.tec_toggle.blockSignals(True)
+                self.tec_toggle.setChecked(tecon_state == 1)
+                self.tec_toggle.blockSignals(False)
+            else:
+                print("⚠ Could not read tecon state from device")
 
             # Ensure laser is OFF (safety first)
             # Note: lason state is synced automatically via status command polling
             print("ℹ Ensuring laser is OFF for safety...")
             self.my_serial.sendToBox("lason 0")
-            time.sleep(0.1)
+            time.sleep(0.15)
+            # Clear response buffer
+            if self.my_serial.box and self.my_serial.box.in_waiting > 0:
+                self.my_serial.box.flushInput()
 
             # Update laser toggle UI to OFF
             self.laser_toggle.blockSignals(True)
@@ -608,7 +600,10 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             # Enable TEC
             print("ℹ Enabling TEC for temperature control...")
             self.my_serial.sendToBox("tecon 1")
-            time.sleep(0.1)
+            time.sleep(0.15)
+            # Clear response buffer
+            if self.my_serial.box and self.my_serial.box.in_waiting > 0:
+                self.my_serial.box.flushInput()
 
             # Update TEC toggle UI to ON
             self.tec_toggle.blockSignals(True)
@@ -845,13 +840,9 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
         # Call the standard connection success handler
         self._on_connection_success()
 
-        # Show success message
-        QtWidgets.QMessageBox.information(
-            self.main_window,
-            'Reconnection Successful',
-            'Successfully reconnected to CTL200-0!',
-            QtWidgets.QMessageBox.StandardButton.Ok
-        )
+        # Show success message in status bar temporarily (5 seconds)
+        if hasattr(self, 'statusbar'):
+            self.statusbar.showMessage('✓ Successfully reconnected to CTL200-0', 5000)
 
     def _on_reconnection_failed(self):
         """Handle failed reconnection"""
@@ -1102,35 +1093,21 @@ Serial Communication Log
         """Read and display current laser state"""
         try:
             if self.my_serial.is_connected():
-                # Send command to read laser state
-                self.my_serial.sendToBox("lason")
-                time.sleep(0.1)
+                # Use the new read_binary_state method which properly filters responses
+                laser_state = self.my_serial.read_binary_state("lason")
 
-                # Read response
-                response = self.my_serial.readLine()
-                if response:
-                    try:
-                        laser_state = int(response.strip())
-                        if laser_state == 0:
-                            print("ℹ Laser state: OFF")
-                            self.laser_toggle.setChecked(False)
-                        elif laser_state == 1:
-                            print("⚠ Laser state: ON")
-                            self.laser_toggle.setChecked(True)
-                        else:
-                            print(f"ℹ Laser state: {response}")
-                    except ValueError:
-                        print(f"ℹ Laser state response: {response}")
+                if laser_state is not None:
+                    if laser_state == 0:
+                        print("ℹ Laser state: OFF")
+                        self.laser_toggle.setChecked(False)
+                    elif laser_state == 1:
+                        print("⚠ Laser state: ON")
+                        self.laser_toggle.setChecked(True)
                 else:
-                    print("ℹ Could not read laser state")
+                    print("ℹ Could not read laser state (no valid response)")
         except Exception as e:
             print(f"✗ Warning: Could not read laser state: {e}")
 
-    def plot_example_data(self):
-        """Plot example temperature data on the graph"""
-        # Don't plot example data - it would destroy self.plot_curve
-        # Real data will be displayed automatically once device connects
-        print("ℹ Plot initialized and ready for real-time data")
 
     def closeEvent(self, event):
         """Handle application close event - ensure laser is turned OFF"""

@@ -357,6 +357,17 @@ class SerialWorker(QObject):
                 return
             time.sleep(0.002)
 
+    def _is_numeric(self, s):
+        """
+        Check if a string represents a valid number (int or float)
+        Returns: True if numeric, False otherwise
+        """
+        try:
+            float(s)
+            return True
+        except (ValueError, TypeError):
+            return False
+
     def _read_response(self, command, timeout=None):
         """
         Read response from device, filtering out command echo and prompt
@@ -474,6 +485,21 @@ class SerialWorker(QObject):
                     if not suffix:
                         continue
 
+                # For commands expecting single values (ilaser, vlaser, etc.), reject multi-value responses
+                # This prevents status command fragments from polluting the response
+                if command in ['ilaser', 'vlaser', 'itec', 'vtec', 'rtact', 'iphd', 'ain1', 'ain2']:
+                    # These commands should return a single numeric value
+                    # If we see multiple space-separated values, it's likely a status fragment
+                    parts = ln_stripped.split()
+                    if len(parts) > 1:
+                        logging.debug(f"Rejecting multi-value response for {command}: '{ln_stripped}'")
+                        continue
+
+                    # Also validate it looks like a number (for numeric commands)
+                    if parts and not self._is_numeric(parts[0]):
+                        logging.debug(f"Rejecting non-numeric response for {command}: '{ln_stripped}'")
+                        continue
+
                 # If we get here, treat ln as the real response
                 return ln_stripped
 
@@ -548,37 +574,21 @@ class SerialWorker(QObject):
         Returns: TEC state (0 or 1) or None on error
         """
         try:
-            # Flush input buffer
-            if hasattr(self.serial_device.box, 'flushInput'):
-                self.serial_device.box.flushInput()
-
             self._log_communication('TX', 'tecon')
-            self.serial_device.sendToBox("tecon")
-            time.sleep(0.1)
 
-            # Read response with filtering
-            response = self._read_response("tecon")
+            # Use the new read_binary_state method which properly filters responses
+            tec_state = self.serial_device.read_binary_state("tecon")
 
-            if response:
-                self._log_communication('RX', response)
-                # Try to convert to int - tecon returns simple 0 or 1
-                try:
-                    tec_state = int(response.strip())
-                    # Validate it's 0 or 1
-                    if tec_state in [0, 1]:
-                        return tec_state
-                    else:
-                        logging.warning(f"Invalid tecon value: {response} (expected 0 or 1)")
-                        return 0
-                except ValueError:
-                    logging.warning(f"Could not parse tecon response as integer: {response}")
-                    return 0
+            if tec_state is not None:
+                self._log_communication('RX', str(tec_state))
+                return tec_state
             else:
-                logging.debug("No response from tecon command")
-                return 0
+                logging.debug("No valid response from tecon command")
+                return None
 
         except Exception as e:
             logging.warning(f"Error reading TEC state: {e}")
+            return None
             return 0
 
     def _read_laser_current(self):
