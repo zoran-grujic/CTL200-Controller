@@ -309,7 +309,16 @@ class SerialWorker(QObject):
                     logging.info(f"Verification response: {verify_response}")
 
                     if cmd_info.get('expected_response'):
-                        success = (verify_response == cmd_info['expected_response'])
+                        # Try numeric comparison first (for floating point values)
+                        try:
+                            expected_float = float(cmd_info['expected_response'])
+                            response_float = float(verify_response)
+                            # Compare with small tolerance for floating point
+                            success = abs(expected_float - response_float) < 0.0001
+                        except (ValueError, TypeError):
+                            # Fall back to string comparison for non-numeric responses
+                            success = (verify_response == cmd_info['expected_response'])
+
                         if not success:
                             logging.warning(
                                 f"Verification failed: expected '{cmd_info['expected_response']}', "

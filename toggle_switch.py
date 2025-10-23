@@ -38,6 +38,7 @@ class AnimatedToggle(QCheckBox):
         self._bar_width = 60
         self._bar_height = 28
         self._handle_radius = 22
+        self._text_margin = 10  # Space between switch and text
 
         # Animation properties
         self._handle_position = 0
@@ -52,8 +53,8 @@ class AnimatedToggle(QCheckBox):
         # Connect signals
         self.stateChanged.connect(self._on_state_changed)
 
-        # Set initial size
-        self.setFixedSize(QSize(self._bar_width, self._bar_height))
+        # Don't set fixed size - let it adjust based on text
+        self.setMinimumSize(QSize(self._bar_width, self._bar_height))
 
     def _on_state_changed(self, state):
         """Handle state change and animate"""
@@ -146,13 +147,33 @@ class AnimatedToggle(QCheckBox):
                                    self._handle_radius,
                                    self._handle_radius))
 
+        # Draw text label to the right of the switch
+        text = self.text()
+        if text:
+            painter.setPen(self.palette().text().color())  # Use default text color
+            font = self.font()
+            painter.setFont(font)
+
+            # Position text to the right of the switch
+            text_x = self._bar_width + self._text_margin
+            text_rect = QRectF(text_x, 0, self.width() - text_x, self.height())
+            painter.drawText(text_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
+
     def hitButton(self, pos):
         """Override to make entire widget clickable"""
         return self.contentsRect().contains(pos)
 
     def sizeHint(self):
-        """Return the recommended size"""
-        return QSize(self._bar_width, self._bar_height)
+        """Return the recommended size - includes space for text"""
+        text = self.text()
+        if text:
+            # Calculate text width
+            fm = self.fontMetrics()
+            text_width = fm.horizontalAdvance(text)
+            total_width = self._bar_width + self._text_margin + text_width + 10  # +10 for padding
+            return QSize(total_width, max(self._bar_height, fm.height()))
+        else:
+            return QSize(self._bar_width, self._bar_height)
 
 
 class LaserToggle(AnimatedToggle):

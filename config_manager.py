@@ -36,7 +36,9 @@ class ConfigManager:
                 "ilmax": 100.0,
                 "ldelay": 1000.0,
                 "lckon": 0,
-                "lmodgain": 0.0
+                "lmodgain": 0.0,
+                "ain1_enable": 0,
+                "ain1_curr_gain": 0.0
             },
             "tec": {
                 "tecon": 0,
@@ -49,7 +51,9 @@ class ConfigManager:
                 "rtmax": 15000.0,
                 "vtmin": -2.0,
                 "vtmax": 2.0,
-                "tmodgain": 0.0
+                "tmodgain": 0.0,
+                "ain2_enable": 0,
+                "ain2_temp_gain": 0.0
             },
             "device_info": {
                 "model": "",

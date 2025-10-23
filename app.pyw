@@ -169,107 +169,138 @@ class MyUi(Ui_MainWindow):
         except Exception as e:
             print(f"✗ Error setting up temperature plot: {e}")
 
+        # Helper to replace a placeholder widget in its actual layout, preserving grid position
+        def _replace_placeholder_widget(placeholder, new_widget):
+            try:
+                if placeholder is None:
+                    return False
+                parent = placeholder.parent()
+                if parent is None:
+                    return False
+
+                # Extract text and tooltip from original checkbox before replacing
+                try:
+                    label_text = placeholder.text()
+                    tooltip_text = placeholder.toolTip()
+
+                    # Apply to new widget
+                    if label_text:
+                        new_widget.setText(label_text)
+                    if tooltip_text:
+                        new_widget.setToolTip(tooltip_text)
+                except Exception as e:
+                    print(f"⚠ Could not extract label/tooltip: {e}")
+
+                # Get the parent's layout (where checkbox actually lives)
+                layout = parent.layout()
+                if layout is not None:
+                    # Find the placeholder in this layout
+                    for i in range(layout.count()):
+                        item = layout.itemAt(i)
+                        if item is None:
+                            continue
+                        if item.widget() is placeholder:
+                            # For QGridLayout, preserve exact row/column/span
+                            if isinstance(layout, QtWidgets.QGridLayout):
+                                try:
+                                    row, col, rowspan, colspan = layout.getItemPosition(i)
+                                except Exception:
+                                    row = col = rowspan = colspan = None
+
+                                layout.removeWidget(placeholder)
+                                placeholder.setParent(None)
+                                placeholder.hide()
+
+                                if row is not None:
+                                    layout.addWidget(new_widget, row, col, rowspan, colspan)
+                                else:
+                                    # Fallback: add at top-left if position unknown
+                                    layout.addWidget(new_widget, 0, 0, 1, 1)
+                                return True
+                            else:
+                                # Non-grid layout: just replace by index
+                                layout.removeWidget(placeholder)
+                                placeholder.setParent(None)
+                                placeholder.hide()
+                                layout.insertWidget(i, new_widget)
+                                return True
+
+                return False
+            except Exception as e:
+                print(f"⚠ Error in _replace_placeholder_widget: {e}")
+                return False
+
         # Create and add Laser toggle switch to Laser tab
+        self.laser_toggle = None
         try:
-            # Look for a placeholder QCheckBox first (if added in Qt Designer)
+            self.laser_toggle = LaserToggle(parent=self.tabLaserControll)
+
+            # Try to replace checkbox in its actual layout (likely inside groupBox/gridLayout_6)
+            replaced = False
             if hasattr(self, 'checkBox_LaserEnable'):
-                print("ℹ Found laser toggle placeholder, replacing...")
-                self.laser_toggle = LaserToggle(parent=self.tabLaserControll)
+                replaced = _replace_placeholder_widget(self.checkBox_LaserEnable, self.laser_toggle)
+                if replaced:
+                    print("✓ Replaced Laser checkbox with animated toggle in original layout")
 
-                # Find the checkbox in the layout - it's in gridLayout_2
-                if hasattr(self, 'gridLayout_2'):
-                    # The Laser checkbox is at row 0, column 0 in gridLayout_2
-                    # Remove the old checkbox
-                    self.gridLayout_2.removeWidget(self.checkBox_LaserEnable)
-                    self.checkBox_LaserEnable.setParent(None)
-                    self.checkBox_LaserEnable.hide()
-                    self.checkBox_LaserEnable.deleteLater()
+            # Fallback: add toggle manually if replacement failed
+            if not replaced:
+                print("ℹ No placeholder found for Laser checkbox, adding toggle manually...")
+                if self.tabLaserControll.layout():
+                    control_layout = QtWidgets.QHBoxLayout()
+                    laser_label = QtWidgets.QLabel("Laser Enable:")
+                    laser_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
+                    control_layout.addWidget(laser_label)
+                    control_layout.addWidget(self.laser_toggle)
+                    control_layout.addStretch()
+                    self.tabLaserControll.layout().insertLayout(0, control_layout)
+                    print("✓ Added laser toggle to tab layout")
 
-                    # Add the toggle switch at the same position
-                    self.gridLayout_2.addWidget(self.laser_toggle, 0, 0, 1, 1)
-                    print("✓ Replaced Laser checkbox with animated toggle")
-                else:
-                    # Fallback if gridLayout_2 not found
-                    print("⚠ gridLayout_2 not found, trying alternate approach...")
-                    laser_layout = self.tabLaserControll.layout()
-                    for i in range(laser_layout.count()):
-                        item = laser_layout.itemAt(i)
-                        if item and item.widget() == self.checkBox_LaserEnable:
-                            laser_layout.removeWidget(self.checkBox_LaserEnable)
-                            self.checkBox_LaserEnable.setParent(None)
-                            self.checkBox_LaserEnable.hide()
-                            self.checkBox_LaserEnable.deleteLater()
-                            laser_layout.insertWidget(i, self.laser_toggle)
-                            print("✓ Replaced placeholder with animated toggle")
-                            break
-            else:
-                print("ℹ No placeholder found, adding toggle manually...")
-                self.laser_toggle = LaserToggle(parent=self.tabLaserControll)
-                laser_layout = self.tabLaserControll.layout()
-                control_layout = QtWidgets.QHBoxLayout()
-                laser_label = QtWidgets.QLabel("Laser Enable:")
-                laser_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
-                control_layout.addWidget(laser_label)
-                control_layout.addWidget(self.laser_toggle)
-                control_layout.addStretch()
-                laser_layout.insertLayout(0, control_layout)
-
-            self.laser_toggle.toggled.connect(self.on_laser_toggled)
-            self.laser_toggle.setEnabled(False)
-            print("✓ Laser toggle switch added to Laser tab")
+            # Connect signal and disable initially
+            if self.laser_toggle:
+                self.laser_toggle.toggled.connect(self.on_laser_toggled)
+                self.laser_toggle.setEnabled(False)
+                print("✓ Laser toggle switch configured")
         except Exception as e:
-            print(f"Error setting up laser toggle: {e}")
+            print(f"✗ Error setting up laser toggle: {e}")
             import traceback
             traceback.print_exc()
+            if not self.laser_toggle:
+                self.laser_toggle = LaserToggle(parent=self.tabLaserControll)
 
         # Create and add TEC toggle switch to Laser tab
+        self.tec_toggle = None
         try:
+            self.tec_toggle = TECToggle(parent=self.tabLaserControll)
+
+            # Use the same helper to replace TEC checkbox
+            replaced = False
             if hasattr(self, 'checkBox_TECEnable'):
-                print("ℹ Found TEC toggle placeholder, replacing...")
-                self.tec_toggle = TECToggle(parent=self.tabLaserControll)
+                replaced = _replace_placeholder_widget(self.checkBox_TECEnable, self.tec_toggle)
+                if replaced:
+                    print("✓ Replaced TEC checkbox with animated toggle in original layout")
 
-                # Find the checkbox in the layout - it's in gridLayout_2
-                if hasattr(self, 'gridLayout_2'):
-                    # The TEC checkbox is at row 1, column 0 in gridLayout_2
-                    # Remove the old checkbox
-                    self.gridLayout_2.removeWidget(self.checkBox_TECEnable)
-                    self.checkBox_TECEnable.hide()
-                    self.checkBox_TECEnable.deleteLater()
+            if not replaced:
+                print("ℹ No placeholder found for TEC checkbox, adding TEC toggle manually...")
+                if self.tabLaserControll.layout():
+                    tec_layout = QtWidgets.QHBoxLayout()
+                    tec_label = QtWidgets.QLabel("TEC Enable:")
+                    tec_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
+                    tec_layout.addWidget(tec_label)
+                    tec_layout.addWidget(self.tec_toggle)
+                    tec_layout.addStretch()
+                    self.tabLaserControll.layout().insertLayout(1, tec_layout)
+                    print("✓ Added TEC toggle to tab layout")
 
-                    # Add the toggle switch at the same position
-                    self.gridLayout_2.addWidget(self.tec_toggle, 1, 0, 1, 1)
-                    print("✓ Replaced TEC checkbox with animated toggle")
-                else:
-                    # Fallback if gridLayout_2 not found
-                    laser_layout = self.tabLaserControll.layout()
-                    for i in range(laser_layout.count()):
-                        item = laser_layout.itemAt(i)
-                        if item and item.widget() == self.checkBox_TECEnable:
-                            laser_layout.removeWidget(self.checkBox_TECEnable)
-                            self.checkBox_TECEnable.hide()
-                            self.checkBox_TECEnable.deleteLater()
-                            laser_layout.insertWidget(i, self.tec_toggle)
-                            print("✓ Replaced TEC checkbox with animated toggle (fallback)")
-                            break
-            else:
-                print("ℹ No TEC placeholder found, adding toggle manually...")
-                self.tec_toggle = TECToggle(parent=self.tabLaserControll)
-                laser_layout = self.tabLaserControll.layout()
-                tec_layout = QtWidgets.QHBoxLayout()
-                tec_label = QtWidgets.QLabel("TEC Enable:")
-                tec_label.setStyleSheet("font-size: 14pt; font-weight: bold;")
-                tec_layout.addWidget(tec_label)
-                tec_layout.addWidget(self.tec_toggle)
-                tec_layout.addStretch()
-                laser_layout.insertLayout(1, tec_layout)
-
-            self.tec_toggle.toggled.connect(self.on_tec_toggled)
-            self.tec_toggle.setEnabled(False)
-            print("✓ TEC toggle switch added to Laser tab")
+            if self.tec_toggle:
+                self.tec_toggle.toggled.connect(self.on_tec_toggled)
+                self.tec_toggle.setEnabled(False)
+                print("✓ TEC toggle switch configured")
         except Exception as e:
-            print(f"Error setting up TEC toggle: {e}")
+            print(f"✗ Error setting up TEC toggle: {e}")
             import traceback
             traceback.print_exc()
+            if not self.tec_toggle:
+                self.tec_toggle = TECToggle(parent=self.tabLaserControll)
 
         # Initialize status labels with default values
         self.label_LaserCurrent_mA.setText("0.0 mA")
@@ -291,6 +322,34 @@ class MyUi(Ui_MainWindow):
         self.doubleSpinBox_I.setEnabled(False)  # Disabled until connected
         self.doubleSpinBox_D.valueChanged.connect(self.on_dgain_changed)
         self.doubleSpinBox_D.setEnabled(False)  # Disabled until connected
+
+        # Connect modulation control signals (ain1 for laser current, ain2 for temperature)
+        if hasattr(self, 'checkBox_ain1Enable'):
+            self.checkBox_ain1Enable.stateChanged.connect(self.on_ain1_enable_changed)
+            self.checkBox_ain1Enable.setEnabled(False)  # Disabled until connected
+        if hasattr(self, 'checkBox_ain2Enable'):
+            self.checkBox_ain2Enable.stateChanged.connect(self.on_ain2_enable_changed)
+            self.checkBox_ain2Enable.setEnabled(False)  # Disabled until connected
+        if hasattr(self, 'doubleSpinBox_ain1CurrGain'):
+            self.doubleSpinBox_ain1CurrGain.valueChanged.connect(self.on_ain1_curr_gain_changed)
+            self.doubleSpinBox_ain1CurrGain.setEnabled(False)  # Disabled until connected
+        if hasattr(self, 'doubleSpinBox_ain2TempGain'):
+            self.doubleSpinBox_ain2TempGain.valueChanged.connect(self.on_ain2_temp_gain_changed)
+            self.doubleSpinBox_ain2TempGain.setEnabled(False)  # Disabled until connected
+
+        # Connect temperature and voltage limit spinbox signals
+        if hasattr(self, 'doubleSpinBox_rtmax'):
+            self.doubleSpinBox_rtmax.valueChanged.connect(self.on_rtmax_changed)
+            self.doubleSpinBox_rtmax.setEnabled(False)  # Disabled until connected
+        if hasattr(self, 'doubleSpinBox_rtmin'):
+            self.doubleSpinBox_rtmin.valueChanged.connect(self.on_rtmin_changed)
+            self.doubleSpinBox_rtmin.setEnabled(False)  # Disabled until connected
+        if hasattr(self, 'doubleSpinBox_vtmax'):
+            self.doubleSpinBox_vtmax.valueChanged.connect(self.on_vtmax_changed)
+            self.doubleSpinBox_vtmax.setEnabled(False)  # Disabled until connected
+        if hasattr(self, 'doubleSpinBox_vtmin'):
+            self.doubleSpinBox_vtmin.valueChanged.connect(self.on_vtmin_changed)
+            self.doubleSpinBox_vtmin.setEnabled(False)  # Disabled until connected
 
         # Connect save settings button
         self.pushButton_SaveSettings.clicked.connect(self.on_save_settings_clicked)
@@ -428,10 +487,25 @@ Device is ready for operation.
         self.doubleSpinBox_I.setEnabled(True)
         self.doubleSpinBox_D.setEnabled(True)
 
-        # Enable PID gain spinboxes
-        self.doubleSpinBox_P.setEnabled(True)
-        self.doubleSpinBox_I.setEnabled(True)
-        self.doubleSpinBox_D.setEnabled(True)
+        # Enable modulation control widgets
+        if hasattr(self, 'checkBox_ain1Enable'):
+            self.checkBox_ain1Enable.setEnabled(True)
+        if hasattr(self, 'checkBox_ain2Enable'):
+            self.checkBox_ain2Enable.setEnabled(True)
+        if hasattr(self, 'doubleSpinBox_ain1CurrGain'):
+            self.doubleSpinBox_ain1CurrGain.setEnabled(True)
+        if hasattr(self, 'doubleSpinBox_ain2TempGain'):
+            self.doubleSpinBox_ain2TempGain.setEnabled(True)
+
+        # Enable temperature and voltage limit spinboxes
+        if hasattr(self, 'doubleSpinBox_rtmax'):
+            self.doubleSpinBox_rtmax.setEnabled(True)
+        if hasattr(self, 'doubleSpinBox_rtmin'):
+            self.doubleSpinBox_rtmin.setEnabled(True)
+        if hasattr(self, 'doubleSpinBox_vtmax'):
+            self.doubleSpinBox_vtmax.setEnabled(True)
+        if hasattr(self, 'doubleSpinBox_vtmin'):
+            self.doubleSpinBox_vtmin.setEnabled(True)
 
         # Update connect/disconnect button state
         if hasattr(self, 'pushButton_connectDisconnect'):
@@ -557,6 +631,87 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             if 'tprot' in tec_config:
                 tprot = tec_config['tprot']
                 send_and_clear(f"tprot {tprot}", f"tprot={tprot}")
+
+            # Apply modulation settings (ain1 for laser current)
+            ain1_enable = laser_config.get('ain1_enable', 0)
+            ain1_curr_gain = laser_config.get('ain1_curr_gain', 0.0)
+
+            # Update UI checkbox
+            if hasattr(self, 'checkBox_ain1Enable'):
+                self.checkBox_ain1Enable.blockSignals(True)
+                self.checkBox_ain1Enable.setChecked(ain1_enable == 1)
+                self.checkBox_ain1Enable.blockSignals(False)
+
+            # Update UI spinbox
+            if hasattr(self, 'doubleSpinBox_ain1CurrGain'):
+                self.doubleSpinBox_ain1CurrGain.blockSignals(True)
+                self.doubleSpinBox_ain1CurrGain.setValue(ain1_curr_gain)
+                self.doubleSpinBox_ain1CurrGain.blockSignals(False)
+                # Enable/disable spinbox based on checkbox state
+                self.doubleSpinBox_ain1CurrGain.setEnabled(ain1_enable == 1)
+
+            # Send lmodgain command: 0 if disabled, actual gain if enabled
+            if ain1_enable == 1:
+                send_and_clear(f"lmodgain {ain1_curr_gain:.6f}", f"lmodgain={ain1_curr_gain:.6f}")
+            else:
+                send_and_clear("lmodgain 0.0", "lmodgain=0.0")
+
+            # Apply modulation settings (ain2 for temperature)
+            ain2_enable = tec_config.get('ain2_enable', 0)
+            ain2_temp_gain = tec_config.get('ain2_temp_gain', 0.0)
+
+            # Update UI checkbox
+            if hasattr(self, 'checkBox_ain2Enable'):
+                self.checkBox_ain2Enable.blockSignals(True)
+                self.checkBox_ain2Enable.setChecked(ain2_enable == 1)
+                self.checkBox_ain2Enable.blockSignals(False)
+
+            # Update UI spinbox
+            if hasattr(self, 'doubleSpinBox_ain2TempGain'):
+                self.doubleSpinBox_ain2TempGain.blockSignals(True)
+                self.doubleSpinBox_ain2TempGain.setValue(ain2_temp_gain)
+                self.doubleSpinBox_ain2TempGain.blockSignals(False)
+                # Enable/disable spinbox based on checkbox state
+                self.doubleSpinBox_ain2TempGain.setEnabled(ain2_enable == 1)
+
+            # Send tmodgain command: 0 if disabled, actual gain if enabled
+            if ain2_enable == 1:
+                send_and_clear(f"tmodgain {ain2_temp_gain:.6f}", f"tmodgain={ain2_temp_gain:.6f}")
+            else:
+                send_and_clear("tmodgain 0.0", "tmodgain=0.0")
+
+            # Apply temperature and voltage limit settings
+            if 'rtmax' in tec_config:
+                rtmax = tec_config['rtmax']
+                send_and_clear(f"rtmax {rtmax:.6f}", f"rtmax={rtmax:.3f}Ω")
+                if hasattr(self, 'doubleSpinBox_rtmax'):
+                    self.doubleSpinBox_rtmax.blockSignals(True)
+                    self.doubleSpinBox_rtmax.setValue(rtmax)
+                    self.doubleSpinBox_rtmax.blockSignals(False)
+
+            if 'rtmin' in tec_config:
+                rtmin = tec_config['rtmin']
+                send_and_clear(f"rtmin {rtmin:.6f}", f"rtmin={rtmin:.3f}Ω")
+                if hasattr(self, 'doubleSpinBox_rtmin'):
+                    self.doubleSpinBox_rtmin.blockSignals(True)
+                    self.doubleSpinBox_rtmin.setValue(rtmin)
+                    self.doubleSpinBox_rtmin.blockSignals(False)
+
+            if 'vtmax' in tec_config:
+                vtmax = tec_config['vtmax']
+                send_and_clear(f"vtmax {vtmax:.6f}", f"vtmax={vtmax:.3f}V")
+                if hasattr(self, 'doubleSpinBox_vtmax'):
+                    self.doubleSpinBox_vtmax.blockSignals(True)
+                    self.doubleSpinBox_vtmax.setValue(vtmax)
+                    self.doubleSpinBox_vtmax.blockSignals(False)
+
+            if 'vtmin' in tec_config:
+                vtmin = tec_config['vtmin']
+                send_and_clear(f"vtmin {vtmin:.6f}", f"vtmin={vtmin:.3f}V")
+                if hasattr(self, 'doubleSpinBox_vtmin'):
+                    self.doubleSpinBox_vtmin.blockSignals(True)
+                    self.doubleSpinBox_vtmin.setValue(vtmin)
+                    self.doubleSpinBox_vtmin.blockSignals(False)
 
             print(f"✓ Settings applied: {', '.join(settings_applied)}")
 
@@ -1413,6 +1568,256 @@ Serial Communication Log
             if hasattr(self, 'statusbar'):
                 self.statusbar.showMessage(f"Error setting D gain: {e}", 5000)
 
+    def on_ain1_enable_changed(self, state):
+        """Handle ain1 (laser current modulation) enable checkbox change"""
+        if not self.my_serial.is_connected():
+            print("✗ Cannot set ain1 enable: Not connected")
+            return
+
+        try:
+            # When enabling: enable spinbox and set to current gain value
+            # When disabling: disable spinbox and set gain to 0
+            if state == QtCore.Qt.CheckState.Checked.value:
+                # Enable the spinbox
+                if hasattr(self, 'doubleSpinBox_ain1CurrGain'):
+                    self.doubleSpinBox_ain1CurrGain.setEnabled(True)
+                    gain_value = self.doubleSpinBox_ain1CurrGain.value()
+                else:
+                    gain_value = 0.0
+                command = f"lmodgain {gain_value:.6f}"
+                print(f"ℹ Enabling laser current modulation (ain1) with gain {gain_value:.6f}...")
+            else:
+                # Disable the spinbox and set gain to 0
+                if hasattr(self, 'doubleSpinBox_ain1CurrGain'):
+                    self.doubleSpinBox_ain1CurrGain.setEnabled(False)
+                gain_value = 0.0
+                command = "lmodgain 0.0"
+                print(f"ℹ Disabling laser current modulation (ain1)...")
+
+            if self.serial_worker:
+                # Queue command with verification
+                self.serial_worker.execute_command(
+                    command=command,
+                    verify_command="lmodgain",
+                    expected_response=f"{gain_value:.6f}"
+                )
+            else:
+                # Fallback to direct command if worker not available
+                self.my_serial.sendToBox(command)
+                time.sleep(0.1)
+                print(f"✓ Laser current modulation {'enabled' if state == QtCore.Qt.CheckState.Checked.value else 'disabled'} (no verification)")
+
+        except Exception as e:
+            print(f"✗ Error setting ain1 enable: {e}")
+            if hasattr(self, 'statusbar'):
+                self.statusbar.showMessage(f"Error setting ain1 enable: {e}", 5000)
+
+    def on_ain1_curr_gain_changed(self, value):
+        """Handle ain1 current gain spinbox value change"""
+        if not self.my_serial.is_connected():
+            print("✗ Cannot set ain1 current gain: Not connected")
+            return
+
+        try:
+            # Format command with 6 decimal places for precision
+            command = f"lmodgain {value:.6f}"
+            print(f"ℹ Setting laser current modulation gain to {value:.6f}...")
+
+            if self.serial_worker:
+                # Queue command with verification
+                self.serial_worker.execute_command(
+                    command=command,
+                    verify_command="lmodgain",
+                    expected_response=f"{value:.6f}"
+                )
+            else:
+                # Fallback to direct command if worker not available
+                self.my_serial.sendToBox(command)
+                time.sleep(0.1)
+                print(f"✓ Laser current modulation gain set to {value:.6f} (no verification)")
+
+        except Exception as e:
+            print(f"✗ Error setting ain1 current gain: {e}")
+            if hasattr(self, 'statusbar'):
+                self.statusbar.showMessage(f"Error setting ain1 current gain: {e}", 5000)
+
+    def on_ain2_enable_changed(self, state):
+        """Handle ain2 (temperature modulation) enable checkbox change"""
+        if not self.my_serial.is_connected():
+            print("✗ Cannot set ain2 enable: Not connected")
+            return
+
+        try:
+            # When enabling: enable spinbox and set to current gain value
+            # When disabling: disable spinbox and set gain to 0
+            if state == QtCore.Qt.CheckState.Checked.value:
+                # Enable the spinbox
+                if hasattr(self, 'doubleSpinBox_ain2TempGain'):
+                    self.doubleSpinBox_ain2TempGain.setEnabled(True)
+                    gain_value = self.doubleSpinBox_ain2TempGain.value()
+                else:
+                    gain_value = 0.0
+                command = f"tmodgain {gain_value:.6f}"
+                print(f"ℹ Enabling temperature modulation (ain2) with gain {gain_value:.6f}...")
+            else:
+                # Disable the spinbox and set gain to 0
+                if hasattr(self, 'doubleSpinBox_ain2TempGain'):
+                    self.doubleSpinBox_ain2TempGain.setEnabled(False)
+                gain_value = 0.0
+                command = "tmodgain 0.0"
+                print(f"ℹ Disabling temperature modulation (ain2)...")
+
+            if self.serial_worker:
+                # Queue command with verification
+                self.serial_worker.execute_command(
+                    command=command,
+                    verify_command="tmodgain",
+                    expected_response=f"{gain_value:.6f}"
+                )
+            else:
+                # Fallback to direct command if worker not available
+                self.my_serial.sendToBox(command)
+                time.sleep(0.1)
+                print(f"✓ Temperature modulation {'enabled' if state == QtCore.Qt.CheckState.Checked.value else 'disabled'} (no verification)")
+
+        except Exception as e:
+            print(f"✗ Error setting ain2 enable: {e}")
+            if hasattr(self, 'statusbar'):
+                self.statusbar.showMessage(f"Error setting ain2 enable: {e}", 5000)
+
+    def on_ain2_temp_gain_changed(self, value):
+        """Handle ain2 temperature gain spinbox value change"""
+        if not self.my_serial.is_connected():
+            print("✗ Cannot set ain2 temperature gain: Not connected")
+            return
+
+        try:
+            # Format command with 6 decimal places for precision
+            command = f"tmodgain {value:.6f}"
+            print(f"ℹ Setting temperature modulation gain to {value:.6f}...")
+
+            if self.serial_worker:
+                # Queue command with verification
+                self.serial_worker.execute_command(
+                    command=command,
+                    verify_command="tmodgain",
+                    expected_response=f"{value:.6f}"
+                )
+            else:
+                # Fallback to direct command if worker not available
+                self.my_serial.sendToBox(command)
+                time.sleep(0.1)
+                print(f"✓ Temperature modulation gain set to {value:.6f} (no verification)")
+
+        except Exception as e:
+            print(f"✗ Error setting ain2 temperature gain: {e}")
+            if hasattr(self, 'statusbar'):
+                self.statusbar.showMessage(f"Error setting ain2 temperature gain: {e}", 5000)
+
+    def on_rtmax_changed(self, value):
+        """Handle rtmax (maximum temperature resistance) spinbox value change"""
+        if not self.my_serial.is_connected():
+            print("✗ Cannot set rtmax: Not connected")
+            return
+
+        try:
+            command = f"rtmax {value:.6f}"
+            print(f"ℹ Setting maximum temperature resistance to {value:.3f} Ω...")
+
+            if self.serial_worker:
+                self.serial_worker.execute_command(
+                    command=command,
+                    verify_command="rtmax",
+                    expected_response=f"{value:.6f}"
+                )
+            else:
+                self.my_serial.sendToBox(command)
+                time.sleep(0.1)
+                print(f"✓ Maximum temperature resistance set to {value:.3f} Ω (no verification)")
+
+        except Exception as e:
+            print(f"✗ Error setting rtmax: {e}")
+            if hasattr(self, 'statusbar'):
+                self.statusbar.showMessage(f"Error setting rtmax: {e}", 5000)
+
+    def on_rtmin_changed(self, value):
+        """Handle rtmin (minimum temperature resistance) spinbox value change"""
+        if not self.my_serial.is_connected():
+            print("✗ Cannot set rtmin: Not connected")
+            return
+
+        try:
+            command = f"rtmin {value:.6f}"
+            print(f"ℹ Setting minimum temperature resistance to {value:.3f} Ω...")
+
+            if self.serial_worker:
+                self.serial_worker.execute_command(
+                    command=command,
+                    verify_command="rtmin",
+                    expected_response=f"{value:.6f}"
+                )
+            else:
+                self.my_serial.sendToBox(command)
+                time.sleep(0.1)
+                print(f"✓ Minimum temperature resistance set to {value:.3f} Ω (no verification)")
+
+        except Exception as e:
+            print(f"✗ Error setting rtmin: {e}")
+            if hasattr(self, 'statusbar'):
+                self.statusbar.showMessage(f"Error setting rtmin: {e}", 5000)
+
+    def on_vtmax_changed(self, value):
+        """Handle vtmax (maximum TEC voltage) spinbox value change"""
+        if not self.my_serial.is_connected():
+            print("✗ Cannot set vtmax: Not connected")
+            return
+
+        try:
+            command = f"vtmax {value:.6f}"
+            print(f"ℹ Setting maximum TEC voltage to {value:.3f} V...")
+
+            if self.serial_worker:
+                self.serial_worker.execute_command(
+                    command=command,
+                    verify_command="vtmax",
+                    expected_response=f"{value:.6f}"
+                )
+            else:
+                self.my_serial.sendToBox(command)
+                time.sleep(0.1)
+                print(f"✓ Maximum TEC voltage set to {value:.3f} V (no verification)")
+
+        except Exception as e:
+            print(f"✗ Error setting vtmax: {e}")
+            if hasattr(self, 'statusbar'):
+                self.statusbar.showMessage(f"Error setting vtmax: {e}", 5000)
+
+    def on_vtmin_changed(self, value):
+        """Handle vtmin (minimum TEC voltage) spinbox value change"""
+        if not self.my_serial.is_connected():
+            print("✗ Cannot set vtmin: Not connected")
+            return
+
+        try:
+            command = f"vtmin {value:.6f}"
+            print(f"ℹ Setting minimum TEC voltage to {value:.3f} V...")
+
+            if self.serial_worker:
+                self.serial_worker.execute_command(
+                    command=command,
+                    verify_command="vtmin",
+                    expected_response=f"{value:.6f}"
+                )
+            else:
+                self.my_serial.sendToBox(command)
+                time.sleep(0.1)
+                print(f"✓ Minimum TEC voltage set to {value:.3f} V (no verification)")
+
+        except Exception as e:
+            print(f"✗ Error setting vtmin: {e}")
+            if hasattr(self, 'statusbar'):
+                self.statusbar.showMessage(f"Error setting vtmin: {e}", 5000)
+
 
     def on_save_settings_clicked(self):
         """Handle Save Settings button click - saves current values to config file"""
@@ -1426,18 +1831,58 @@ Serial Communication Log
             i_gain = self.doubleSpinBox_I.value()
             d_gain = self.doubleSpinBox_D.value()
 
-            # Save laser settings
-            self.config.set_laser_config(ilaser=laser_current)
+            # Get modulation control values
+            ain1_enable = 0
+            ain1_curr_gain = 0.0
+            ain2_enable = 0
+            ain2_temp_gain = 0.0
 
-            # Save TEC settings (temperature and PID gains)
+            if hasattr(self, 'checkBox_ain1Enable'):
+                ain1_enable = 1 if self.checkBox_ain1Enable.isChecked() else 0
+            if hasattr(self, 'doubleSpinBox_ain1CurrGain'):
+                ain1_curr_gain = self.doubleSpinBox_ain1CurrGain.value()
+            if hasattr(self, 'checkBox_ain2Enable'):
+                ain2_enable = 1 if self.checkBox_ain2Enable.isChecked() else 0
+            if hasattr(self, 'doubleSpinBox_ain2TempGain'):
+                ain2_temp_gain = self.doubleSpinBox_ain2TempGain.value()
+
+            # Get temperature and voltage limit values
+            rtmax = 15000.0
+            rtmin = 5000.0
+            vtmax = 2.0
+            vtmin = -2.0
+
+            if hasattr(self, 'doubleSpinBox_rtmax'):
+                rtmax = self.doubleSpinBox_rtmax.value()
+            if hasattr(self, 'doubleSpinBox_rtmin'):
+                rtmin = self.doubleSpinBox_rtmin.value()
+            if hasattr(self, 'doubleSpinBox_vtmax'):
+                vtmax = self.doubleSpinBox_vtmax.value()
+            if hasattr(self, 'doubleSpinBox_vtmin'):
+                vtmin = self.doubleSpinBox_vtmin.value()
+
+            # Save laser settings (including ain1 modulation)
+            self.config.set_laser_config(
+                ilaser=laser_current,
+                ain1_enable=ain1_enable,
+                ain1_curr_gain=ain1_curr_gain
+            )
+
+            # Save TEC settings (temperature, PID gains, ain2 modulation, and limits)
             self.config.set_tec_config(
                 rtset=temperature_setpoint,
                 pgain=p_gain,
                 igain=i_gain,
-                dgain=d_gain
+                dgain=d_gain,
+                ain2_enable=ain2_enable,
+                ain2_temp_gain=ain2_temp_gain,
+                rtmax=rtmax,
+                rtmin=rtmin,
+                vtmax=vtmax,
+                vtmin=vtmin
             )
 
-            print(f"✓ Settings saved: Laser={laser_current:.3f}mA, Temp={temperature_setpoint:.3f}Ω, P={p_gain:.6f}, I={i_gain:.6f}, D={d_gain:.6f}")
+            print(f"✓ Settings saved: Laser={laser_current:.3f}mA, Temp={temperature_setpoint:.3f}Ω, P={p_gain:.6f}, I={i_gain:.6f}, D={d_gain:.6f}, ain1={ain1_enable}, ain1_gain={ain1_curr_gain:.6f}, ain2={ain2_enable}, ain2_gain={ain2_temp_gain:.6f}")
 
             if hasattr(self, 'statusbar'):
                 self.statusbar.showMessage("Settings saved to config file", 3000)
@@ -1457,11 +1902,19 @@ Serial Communication Log
             tab_name = self.tabWidget.tabText(index)
             print(f"ℹ Tab changed to: {tab_name}")
 
+            # Only read settings if connected
+            if not self.my_serial.is_connected():
+                return
+
             # If Laser Control tab is activated, read and update settings
             # Note: Temperature controls are now in Laser tab
             if tab_name == "Laser Control" or tab_name == "Laser":
-                self._read_and_update_laser_current()
-                self._read_and_update_temperature_setpoint()
+                # Delay reading to allow widgets to fully initialize
+                # Check if widgets exist before trying to update them
+                if hasattr(self, 'doubleSpinBox_LaserCurrent') and self.doubleSpinBox_LaserCurrent is not None:
+                    QtCore.QTimer.singleShot(150, self._read_and_update_laser_current)
+                if hasattr(self, 'doubleSpinBox_SetTemperature') and self.doubleSpinBox_SetTemperature is not None:
+                    QtCore.QTimer.singleShot(250, self._read_and_update_temperature_setpoint)
 
         except Exception as e:
             print(f"✗ Error handling tab change: {e}")
@@ -1469,79 +1922,121 @@ Serial Communication Log
     def _read_and_update_temperature_setpoint(self):
         """Read temperature setpoint and PID parameters from device and update spinboxes"""
         try:
-            if self.my_serial.is_connected():
-                print("ℹ Reading temperature settings from device...")
-                
-                # Pause the worker thread temporarily to avoid serial conflicts
+            if not self.my_serial.is_connected():
+                return
+
+            print("ℹ Reading temperature settings from device...")
+
+            # Pause the worker thread temporarily to avoid serial conflicts
+            if self.serial_worker:
+                self.serial_worker.paused = True
+                time.sleep(0.2)  # Give more time for current operation to finish
+
+            # Flush input buffer to clear any stale data from previous polling
+            if hasattr(self.my_serial.box, "flushInput"):
+                self.my_serial.box.flushInput()
+                time.sleep(0.05)
+
+            # Define parameters with safety checks for widget existence
+            params = []
+
+            # Only add parameters if widgets exist and are valid
+            if hasattr(self, 'doubleSpinBox_SetTemperature') and self.doubleSpinBox_SetTemperature is not None:
+                try:
+                    self.doubleSpinBox_SetTemperature.objectName()  # Test if widget is valid
+                    params.append(("rtset", self.doubleSpinBox_SetTemperature, "Ω", 3))
+                except RuntimeError:
+                    print("⚠ doubleSpinBox_SetTemperature has been deleted, skipping")
+
+            if hasattr(self, 'doubleSpinBox_P') and self.doubleSpinBox_P is not None:
+                try:
+                    self.doubleSpinBox_P.objectName()
+                    params.append(("pgain", self.doubleSpinBox_P, "", 6))
+                except RuntimeError:
+                    print("⚠ doubleSpinBox_P has been deleted, skipping")
+
+            if hasattr(self, 'doubleSpinBox_I') and self.doubleSpinBox_I is not None:
+                try:
+                    self.doubleSpinBox_I.objectName()
+                    params.append(("igain", self.doubleSpinBox_I, "", 6))
+                except RuntimeError:
+                    print("⚠ doubleSpinBox_I has been deleted, skipping")
+
+            if hasattr(self, 'doubleSpinBox_D') and self.doubleSpinBox_D is not None:
+                try:
+                    self.doubleSpinBox_D.objectName()
+                    params.append(("dgain", self.doubleSpinBox_D, "", 6))
+                except RuntimeError:
+                    print("⚠ doubleSpinBox_D has been deleted, skipping")
+
+            if not params:
+                print("⚠ No valid spinbox widgets found, skipping temperature settings read")
                 if self.serial_worker:
-                    self.serial_worker.paused = True
-                    time.sleep(0.2)  # Give more time for current operation to finish
-                
-                # Flush input buffer to clear any stale data from previous polling
-                if hasattr(self.my_serial.box, "flushInput"):
-                    self.my_serial.box.flushInput()
-                    time.sleep(0.05)
-                
-                # Read all 4 parameters with retry logic
-                params = [
-                    ("rtset", self.doubleSpinBox_SetTemperature, "Ω", 3),
-                    ("pgain", self.doubleSpinBox_P, "", 6),
-                    ("igain", self.doubleSpinBox_I, "", 6),
-                    ("dgain", self.doubleSpinBox_D, "", 6),
-                ]
-                
-                for command, spinbox, unit, decimals in params:
-                    success = False
-                    for attempt in range(3):  # Try up to 3 times
-                        try:
-                            if attempt > 0:
-                                print(f"ℹ Retry {attempt} for {command}...")
-                                # Flush buffer before retry
-                                if hasattr(self.my_serial.box, "flushInput"):
-                                    self.my_serial.box.flushInput()
-                                time.sleep(0.1)
-                            
-                            # Send command
-                            self.my_serial.sendToBox(command)
-                            time.sleep(0.15)
-                            
-                            # Read echo and discard
-                            echo = self.my_serial.readLine()
+                    self.serial_worker.paused = False
+                return
+
+            # Read all parameters with retry logic
+            for command, spinbox, unit, decimals in params:
+                success = False
+                for attempt in range(3):  # Try up to 3 times
+                    try:
+                        if attempt > 0:
+                            print(f"ℹ Retry {attempt} for {command}...")
+                            # Flush buffer before retry
+                            if hasattr(self.my_serial.box, "flushInput"):
+                                self.my_serial.box.flushInput()
                             time.sleep(0.1)
-                            
-                            # Read actual response
-                            response = self.my_serial.readLine()
-                            
-                            if response:
-                                value = float(response.strip())
-                                
-                                # Update spinbox
+
+                        # Send command
+                        self.my_serial.sendToBox(command)
+                        time.sleep(0.15)
+
+                        # Read echo and discard
+                        echo = self.my_serial.readLine()
+                        time.sleep(0.1)
+
+                        # Read actual response
+                        response = self.my_serial.readLine()
+
+                        if response:
+                            value = float(response.strip())
+
+                            # Update spinbox with safety check
+                            try:
                                 spinbox.blockSignals(True)
                                 spinbox.setValue(value)
                                 spinbox.blockSignals(False)
-                                
+
                                 print(f"ℹ Current {command}: {value:.{decimals}f} {unit}")
                                 print(f"✓ {command} spinbox updated to {value:.{decimals}f} {unit}")
                                 success = True
                                 break
-                            else:
-                                print(f"ℹ No response for {command} (attempt {attempt+1})")
-                        
-                        except ValueError as e:
-                            print(f"✗ Error parsing {command}: {e} (response: '{response}', attempt {attempt+1})")
-                        except Exception as e:
-                            print(f"✗ Error reading {command}: {e} (attempt {attempt+1})")
-                        
-                        # Small delay before retry
-                        if attempt < 2:
-                            time.sleep(0.1)
-                    
-                    if not success:
-                        print(f"✗ Failed to read {command} after 3 attempts")
-                
-                # Resume the worker thread
-                if self.serial_worker:
-                    self.serial_worker.paused = False
+                            except RuntimeError:
+                                print(f"⚠ Spinbox for {command} was deleted, skipping update")
+                                success = True  # Don't retry if widget is gone
+                                break
+                        else:
+                            print(f"ℹ No response for {command} (attempt {attempt+1})")
+
+                    except ValueError as e:
+                        response_text = response if 'response' in locals() else 'unknown'
+                        print(f"✗ Error parsing {command}: {e} (response: '{response_text}', attempt {attempt+1})")
+                    except RuntimeError as e:
+                        print(f"✗ Widget deleted for {command}: {e} (attempt {attempt+1})")
+                        break  # Don't retry if widget is deleted
+                    except Exception as e:
+                        print(f"✗ Error reading {command}: {e} (attempt {attempt+1})")
+
+                    # Small delay before retry
+                    if attempt < 2:
+                        time.sleep(0.1)
+
+                if not success:
+                    print(f"✗ Failed to read {command} after 3 attempts")
+
+            # Resume the worker thread
+            if self.serial_worker:
+                self.serial_worker.paused = False
 
         except Exception as e:
             print(f"✗ Error reading temperature settings: {e}")
@@ -1554,41 +2049,57 @@ Serial Communication Log
     def _read_and_update_laser_current(self):
         """Read laser current setpoint from device and update spinbox"""
         try:
-            if self.my_serial.is_connected():
-                print("ℹ Reading laser current setpoint from device...")
+            if not self.my_serial.is_connected():
+                return
 
-                # Pause the worker thread temporarily to avoid serial conflicts
-                if self.serial_worker:
-                    self.serial_worker.paused = True
-                    time.sleep(0.1)  # Let current operation finish
+            # Check if spinbox exists before trying to read
+            if not hasattr(self, 'doubleSpinBox_LaserCurrent') or self.doubleSpinBox_LaserCurrent is None:
+                print("⚠ Laser current spinbox not available, skipping read")
+                return
 
-                # Send command to read laser current (ilaser)
-                self.my_serial.sendToBox("ilaser")
-                time.sleep(0.2)  # Longer delay for response
+            # Verify widget is still valid
+            try:
+                self.doubleSpinBox_LaserCurrent.objectName()
+            except RuntimeError:
+                print("⚠ Laser current spinbox has been deleted, skipping read")
+                return
 
-                # Read response
-                response = self.my_serial.readLine()
+            print("ℹ Reading laser current setpoint from device...")
 
-                # Resume the worker thread
-                if self.serial_worker:
-                    self.serial_worker.paused = False
+            # Pause the worker thread temporarily to avoid serial conflicts
+            if self.serial_worker:
+                self.serial_worker.paused = True
+                time.sleep(0.1)  # Let current operation finish
 
-                if response:
+            # Send command to read laser current (ilaser)
+            self.my_serial.sendToBox("ilaser")
+            time.sleep(0.2)  # Longer delay for response
+
+            # Read response
+            response = self.my_serial.readLine()
+
+            # Resume the worker thread
+            if self.serial_worker:
+                self.serial_worker.paused = False
+
+            if response:
+                try:
+                    laser_current = float(response.strip())
+                    print(f"ℹ Current laser current setpoint: {laser_current:.3f} mA")
+
+                    # Update spinbox with safety check
                     try:
-                        laser_current = float(response.strip())
-                        print(f"ℹ Current laser current setpoint: {laser_current:.3f} mA")
-
-                        # Update spinbox without triggering valueChanged signal
                         self.doubleSpinBox_LaserCurrent.blockSignals(True)
                         self.doubleSpinBox_LaserCurrent.setValue(laser_current)
                         self.doubleSpinBox_LaserCurrent.blockSignals(False)
-
                         print(f"✓ Laser current spinbox updated to {laser_current:.3f} mA")
+                    except RuntimeError:
+                        print("⚠ Laser current spinbox was deleted during update")
 
-                    except ValueError as e:
-                        print(f"✗ Error parsing laser current: {e}")
-                else:
-                    print("ℹ Could not read laser current (no response)")
+                except ValueError as e:
+                    print(f"✗ Error parsing laser current: {e}")
+            else:
+                print("ℹ Could not read laser current (no response)")
 
         except Exception as e:
             print(f"✗ Error reading laser current: {e}")
