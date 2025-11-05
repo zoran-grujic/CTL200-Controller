@@ -109,22 +109,19 @@ class MyUi(Ui_MainWindow):
         self.reconnection_dialog_shown = False
         self.is_reconnecting = False
 
-        # Data for temperature plot using deques for efficient data management
-        self.temperature_R = collections.deque(maxlen=500)
-        self.sample_time = collections.deque(maxlen=500)
-
         # Deques to store recent status values (timestamped). Appended when 'status' replies arrive.
         # Bounded size to avoid unbounded memory growth.
-        self.status_time = collections.deque(maxlen=2000)
-        self.status_lason = collections.deque(maxlen=2000)
-        self.status_vlaser = collections.deque(maxlen=2000)
-        self.status_ilaser = collections.deque(maxlen=2000)
-        self.status_itec = collections.deque(maxlen=2000)
-        self.status_vtec = collections.deque(maxlen=2000)
-        self.status_rtact = collections.deque(maxlen=2000)
-        self.status_iphd = collections.deque(maxlen=2000)
-        self.status_ain1 = collections.deque(maxlen=2000)
-        self.status_ain2 = collections.deque(maxlen=2000)
+        self.status_time = collections.deque(maxlen=500)
+        self.status_lason = collections.deque(maxlen=500)
+        self.status_vlaser = collections.deque(maxlen=500)
+        self.status_ilaser = collections.deque(maxlen=500)
+        self.status_itec = collections.deque(maxlen=500)
+        self.status_vtec = collections.deque(maxlen=500)
+        self.status_rtact = collections.deque(maxlen=500)
+        self.status_rtset = collections.deque(maxlen=500)
+        self.status_iphd = collections.deque(maxlen=500)
+        self.status_ain1 = collections.deque(maxlen=500)
+        self.status_ain2 = collections.deque(maxlen=500)
 
         # Debounce infrastructure: prevent handlers firing more than once per interval
         # Keys are handler names (strings). Values store last value and QTimer instances.
@@ -149,8 +146,153 @@ class MyUi(Ui_MainWindow):
         self.arbPlot.showGrid(x=True, y=True)
         self.plotWindow.setCentralItem(PG_layout)
 
-        # Initialize the plot curve
-        self.plot_curve = self.arbPlot.plot([], [], pen=pg.mkPen(color='#00FF00', width=2))
+        # Initialize the plot curve (actual thermistor) and a setpoint curve (white dashed)
+        # Provide `name=` so they appear in the legend
+        self.plot_curve = self.arbPlot.plot([], [], pen=pg.mkPen(color='#00FF00', width=2), name='RT actual')
+        try:
+            # White dashed line for setpoint (rtset)
+            self.plot_setpoint_curve = self.arbPlot.plot([], [], pen=pg.mkPen(color='#FFFFFF', width=1, style=QtCore.Qt.PenStyle.DashLine), name='RT set')
+        except Exception:
+            # Fallback in case PenStyle enum isn't accepted - use a solid thin white line
+            self.plot_setpoint_curve = self.arbPlot.plot([], [], pen=pg.mkPen(color='#FFFFFF', width=1), name='RT set')
+
+        # Try to add a standard legend; if it is not visible under the embedded UI
+        # we'll add a manual TextItem-based legend as a reliable fallback.
+        try:
+            legend = self.arbPlot.addLegend(offset=(10, 10))
+            if legend is not None:
+                try:
+                    legend.setParentItem(self.arbPlot.graphicsItem())
+                except Exception:
+                    pass
+                try:
+                    legend.setBrush(pg.mkBrush(40, 40, 40, 200))
+                except Exception:
+                    pass
+        except Exception:
+            legend = None
+
+        # Manual overlay legend (pixel-based) - use QGraphicsTextItem to avoid affecting the view auto-range
+        try:
+            # Use HTML with a subtle semi-transparent background so the text is readable
+            html_actual = '<div style="background-color: rgba(40,40,40,0.7); padding:4px; border-radius:4px; color: #00FF00; font-weight: bold">■ RT actual</div>'
+            html_set = '<div style="background-color: rgba(40,40,40,0.7); padding:4px; border-radius:4px; color: #FFFFFF; font-weight: bold">— RT set</div>'
+
+            # Preferred approach: QGraphicsTextItem added as a child of the plot graphicsItem and set to ignore transformations
+            try:
+                gtext_actual = QtWidgets.QGraphicsTextItem()
+                gtext_actual.setHtml(html_actual)
+                gtext_actual.setParentItem(self.arbPlot.graphicsItem())
+                try:
+                    gtext_actual.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+                except Exception:
+                    pass
+
+                gtext_set = QtWidgets.QGraphicsTextItem()
+                gtext_set.setHtml(html_set)
+                gtext_set.setParentItem(self.arbPlot.graphicsItem())
+                try:
+                    gtext_set.setFlag(QtWidgets.QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True)
+                except Exception:
+                    pass
+
+                self.legend_text_actual = gtext_actual
+                self.legend_text_set = gtext_set
+
+                # Position helper (scene coordinates -> fixed pixel positioning)
+                def _position_manual_legend():
+                    try:
+                        if getattr(self, 'legend_text_actual', None) is None or getattr(self, 'legend_text_set', None) is None:
+                            return
+                        vb = self.arbPlot.getViewBox()
+                        # Use the viewbox's scene bounding rect so we position in scene/pixel coordinates
+                        srect = vb.sceneBoundingRect()
+                        inset = 8  # pixels inset from top-right
+                        # compute positions in scene coords: right - inset, top + inset
+                        right = srect.right()
+                        top = srect.top()
+
+                        # Place the first item slightly below the top-right corner
+                        a_rect = self.legend_text_actual.boundingRect()
+                        s_rect = self.legend_text_set.boundingRect()
+
+                        x_a = right - inset - a_rect.width()
+                        y_a = top + inset
+                        x_s = right - inset - s_rect.width()
+                        y_s = y_a + a_rect.height() + 4
+
+                        self.legend_text_actual.setPos(x_a, y_a)
+                        self.legend_text_set.setPos(x_s, y_s)
+                        try:
+                            self.legend_text_actual.setZValue(1000)
+                            self.legend_text_set.setZValue(1000)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                # Position once after layout and on view range changes
+                try:
+                    QtCore.QTimer.singleShot(250, _position_manual_legend)
+                except Exception:
+                    pass
+
+                try:
+                    vb = self.arbPlot.getViewBox()
+                    try:
+                        vb.sigRangeChanged.connect(lambda *args: _position_manual_legend())
+                    except Exception:
+                        # fallback: connect to sceneRect changed if available
+                        try:
+                            vb.sigTransformChanged.connect(lambda *args: _position_manual_legend())
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            except Exception:
+                # If QGraphicsTextItem approach fails, fall back to pg.TextItem but ensure ignoreBounds when possible
+                self.legend_text_actual = pg.TextItem(html=html_actual, anchor=(1, 0))
+                self.legend_text_set = pg.TextItem(html=html_set, anchor=(1, 0))
+                try:
+                    self.arbPlot.addItem(self.legend_text_actual, ignoreBounds=True)
+                except Exception:
+                    self.arbPlot.addItem(self.legend_text_actual)
+                try:
+                    self.arbPlot.addItem(self.legend_text_set, ignoreBounds=True)
+                except Exception:
+                    self.arbPlot.addItem(self.legend_text_set)
+
+                def _position_manual_legend_fallback():
+                    try:
+                        vb = self.arbPlot.getViewBox()
+                        vr = vb.viewRange()
+                        x_max = vr[0][1]
+                        x_min = vr[0][0]
+                        y_min, y_max = vr[1][0], vr[1][1]
+                        x_range = x_max - x_min if (x_max - x_min) != 0 else 1.0
+                        y_range = y_max - y_min if (y_max - y_min) != 0 else 1.0
+                        x_pos = x_max - 0.01 * x_range
+                        self.legend_text_actual.setPos(x_pos, y_max - 0.02 * y_range)
+                        self.legend_text_set.setPos(x_pos, y_max - 0.08 * y_range)
+                    except Exception:
+                        pass
+
+                try:
+                    QtCore.QTimer.singleShot(500, _position_manual_legend_fallback)
+                except Exception:
+                    pass
+
+                try:
+                    vb = self.arbPlot.getViewBox()
+                    vb.sigRangeChanged.connect(lambda *args: _position_manual_legend_fallback())
+                except Exception:
+                    pass
+
+        except Exception:
+            # If neither method works, leave legend attributes None
+            self.legend_text_actual = None
+            self.legend_text_set = None
 
         # Replace the plot placeholder with actual plot widget (now in Laser tab)
         try:
@@ -815,10 +957,7 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             self.serial_thread.started.connect(self.serial_worker.start_polling)
 
             # Clear the deques for fresh data collection
-            self.temperature_R.clear()
-            self.sample_time.clear()
-
-            # Also clear the status deques
+            # (status_time and status_rtact/status_rtset used for plotting)
             self.status_time.clear()
             self.status_lason.clear()
             self.status_vlaser.clear()
@@ -826,6 +965,7 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             self.status_itec.clear()
             self.status_vtec.clear()
             self.status_rtact.clear()
+            self.status_rtset.clear()
             self.status_iphd.clear()
             self.status_ain1.clear()
             self.status_ain2.clear()
@@ -863,6 +1003,7 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
         self.status_itec.append(status_data.get('itec', None))
         self.status_vtec.append(status_data.get('vtec', None))
         self.status_rtact.append(status_data.get('rtact', None))
+        self.status_rtset.append(self.doubleSpinBox_SetTemperature.value())  # Use setpoint from UI
         self.status_iphd.append(status_data.get('iphd', None))
         self.status_ain1.append(status_data.get('ain1', None))
         self.status_ain2.append(status_data.get('ain2', None))
@@ -882,16 +1023,61 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
                 resistance_kohm = status_data['rtact'] / 1000.0
                 self.label_thermistorR.setText(f"{resistance_kohm:.3f} kΩ")
 
-                # Add data point to plot using deques
-                current_timestamp = time.time()
-                self.temperature_R.append(status_data['rtact'])  # Store in Ω
-                self.sample_time.append(current_timestamp)
+                # Update the plot using status_time and status_rtact/status_rtset
+                if self.plot_curve is not None and len(self.status_time) > 0:
+                    base_time = np.array(self.status_time)[-1]
 
-                # Update the plot
-                if self.plot_curve is not None and len(self.sample_time) > 0:
-                    t = np.array(self.sample_time)
-                    t = t - t[-1]  # Relative time in seconds
-                    self.plot_curve.setData(t, list(self.temperature_R))
+                    # rtact (actual thermistor reading)
+                    valid_act = [i for i, v in enumerate(self.status_rtact) if v is not None]
+                    if valid_act:
+                        times_act = np.array(self.status_time)[valid_act]
+                        values_act = np.array([self.status_rtact[i] for i in valid_act])
+                        times_act = times_act - base_time
+                        self.plot_curve.setData(times_act, values_act)
+                    else:
+                        # No valid actual data
+                        self.plot_curve.setData([], [])
+
+                    # rtset (setpoint) - white dashed line
+                    try:
+                        valid_set = [i for i, v in enumerate(self.status_rtset) if v is not None]
+                        if valid_set:
+                            times_set = np.array(self.status_time)[valid_set]
+                            values_set = np.array([self.status_rtset[i] for i in valid_set])
+                            times_set = times_set - base_time
+                            self.plot_setpoint_curve.setData(times_set, values_set)
+                        else:
+                            self.plot_setpoint_curve.setData([], [])
+                    except Exception:
+                        # Keep setpoint curve empty on any error
+                        try:
+                            self.plot_setpoint_curve.setData([], [])
+                        except Exception:
+                            pass
+
+                    # Position manual TextItem legend items (fallback) in top-right of view
+                    try:
+                        if getattr(self, 'legend_text_actual', None) is not None and getattr(self, 'legend_text_set', None) is not None:
+                            vb = self.arbPlot.getViewBox()
+                            vr = vb.viewRange()  # [[xMin,xMax], [yMin,yMax]]
+                            x_max = vr[0][1]
+                            x_min = vr[0][0]
+                            y_min, y_max = vr[1][0], vr[1][1]
+                            x_range = x_max - x_min if (x_max - x_min) != 0 else 1.0
+                            y_range = y_max - y_min if (y_max - y_min) != 0 else 1.0
+                            # Inset from top-right corner to avoid clipping
+                            x_pos = x_max - 0.01 * x_range
+                            # Slight offsets downward for the two lines
+                            self.legend_text_actual.setPos(x_pos, y_max - 0.02 * y_range)
+                            self.legend_text_set.setPos(x_pos, y_max - 0.08 * y_range)
+                            # Ensure they draw on top
+                            try:
+                                self.legend_text_actual.setZValue(1000)
+                                self.legend_text_set.setZValue(1000)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
 
             # Update laser toggle state if it changed
             if 'lason' in status_data:
@@ -2130,7 +2316,7 @@ Serial Communication Log
             timer = self._debounce_timers.get(handler_name)
             if timer is not None:
                 timer.stop()
-                timer.start(self._debounce_interval_ms)
+                timer.start()
                 return
 
             # Create a new single-shot QTimer
