@@ -126,6 +126,13 @@ class MyUi(Ui_MainWindow):
         self.status_ain1 = collections.deque(maxlen=2000)
         self.status_ain2 = collections.deque(maxlen=2000)
 
+        # Debounce infrastructure: prevent handlers firing more than once per interval
+        # Keys are handler names (strings). Values store last value and QTimer instances.
+        self._debounce_timers = {}
+        self._debounce_values = {}
+        # debounce interval in milliseconds (100ms as requested)
+        self._debounce_interval_ms = 100
+
     def setupUi(self, MainWindow):
         # Store main window reference
         self.main_window = MainWindow
@@ -308,19 +315,19 @@ class MyUi(Ui_MainWindow):
         self.label_thermistorR.setText("0.0 kΩ")
 
         # Connect laser current spinbox signal
-        self.doubleSpinBox_LaserCurrent.valueChanged.connect(self.on_laser_current_changed)
+        self.doubleSpinBox_LaserCurrent.valueChanged.connect(lambda val, name='on_laser_current_changed': self._debounce_call(name, val))
         self.doubleSpinBox_LaserCurrent.setEnabled(False)  # Disabled until connected
 
         # Connect Temperature spinbox signal
-        self.doubleSpinBox_SetTemperature.valueChanged.connect(self.on_temperature_changed)
+        self.doubleSpinBox_SetTemperature.valueChanged.connect(lambda val, name='on_temperature_changed': self._debounce_call(name, val))
         self.doubleSpinBox_SetTemperature.setEnabled(False)  # Disabled until connected
 
         # Connect PID gain spinbox signals
-        self.doubleSpinBox_P.valueChanged.connect(self.on_pgain_changed)
+        self.doubleSpinBox_P.valueChanged.connect(lambda val, name='on_pgain_changed': self._debounce_call(name, val))
         self.doubleSpinBox_P.setEnabled(False)  # Disabled until connected
-        self.doubleSpinBox_I.valueChanged.connect(self.on_igain_changed)
+        self.doubleSpinBox_I.valueChanged.connect(lambda val, name='on_igain_changed': self._debounce_call(name, val))
         self.doubleSpinBox_I.setEnabled(False)  # Disabled until connected
-        self.doubleSpinBox_D.valueChanged.connect(self.on_dgain_changed)
+        self.doubleSpinBox_D.valueChanged.connect(lambda val, name='on_dgain_changed': self._debounce_call(name, val))
         self.doubleSpinBox_D.setEnabled(False)  # Disabled until connected
 
         # Connect modulation control signals (ain1 for laser current, ain2 for temperature)
@@ -331,24 +338,24 @@ class MyUi(Ui_MainWindow):
             self.checkBox_ain2Enable.stateChanged.connect(self.on_ain2_enable_changed)
             self.checkBox_ain2Enable.setEnabled(False)  # Disabled until connected
         if hasattr(self, 'doubleSpinBox_ain1CurrGain'):
-            self.doubleSpinBox_ain1CurrGain.valueChanged.connect(self.on_ain1_curr_gain_changed)
+            self.doubleSpinBox_ain1CurrGain.valueChanged.connect(lambda val, name='on_ain1_curr_gain_changed': self._debounce_call(name, val))
             self.doubleSpinBox_ain1CurrGain.setEnabled(False)  # Disabled until connected
         if hasattr(self, 'doubleSpinBox_ain2TempGain'):
-            self.doubleSpinBox_ain2TempGain.valueChanged.connect(self.on_ain2_temp_gain_changed)
+            self.doubleSpinBox_ain2TempGain.valueChanged.connect(lambda val, name='on_ain2_temp_gain_changed': self._debounce_call(name, val))
             self.doubleSpinBox_ain2TempGain.setEnabled(False)  # Disabled until connected
 
         # Connect temperature and voltage limit spinbox signals
         if hasattr(self, 'doubleSpinBox_rtmax'):
-            self.doubleSpinBox_rtmax.valueChanged.connect(self.on_rtmax_changed)
+            self.doubleSpinBox_rtmax.valueChanged.connect(lambda val, name='on_rtmax_changed': self._debounce_call(name, val))
             self.doubleSpinBox_rtmax.setEnabled(False)  # Disabled until connected
         if hasattr(self, 'doubleSpinBox_rtmin'):
-            self.doubleSpinBox_rtmin.valueChanged.connect(self.on_rtmin_changed)
+            self.doubleSpinBox_rtmin.valueChanged.connect(lambda val, name='on_rtmin_changed': self._debounce_call(name, val))
             self.doubleSpinBox_rtmin.setEnabled(False)  # Disabled until connected
         if hasattr(self, 'doubleSpinBox_vtmax'):
-            self.doubleSpinBox_vtmax.valueChanged.connect(self.on_vtmax_changed)
+            self.doubleSpinBox_vtmax.valueChanged.connect(lambda val, name='on_vtmax_changed': self._debounce_call(name, val))
             self.doubleSpinBox_vtmax.setEnabled(False)  # Disabled until connected
         if hasattr(self, 'doubleSpinBox_vtmin'):
-            self.doubleSpinBox_vtmin.valueChanged.connect(self.on_vtmin_changed)
+            self.doubleSpinBox_vtmin.valueChanged.connect(lambda val, name='on_vtmin_changed': self._debounce_call(name, val))
             self.doubleSpinBox_vtmin.setEnabled(False)  # Disabled until connected
 
         # Connect save settings button
@@ -1979,6 +1986,8 @@ Serial Communication Log
             for command, spinbox, unit, decimals in params:
                 success = False
                 for attempt in range(3):  # Try up to 3 times
+                    # Ensure 'response' exists even if an exception occurs before it's assigned
+                    response = None
                     try:
                         if attempt > 0:
                             print(f"ℹ Retry {attempt} for {command}...")
@@ -2019,7 +2028,7 @@ Serial Communication Log
                             print(f"ℹ No response for {command} (attempt {attempt+1})")
 
                     except ValueError as e:
-                        response_text = response if 'response' in locals() else 'unknown'
+                        response_text = response if response is not None else 'unknown'
                         print(f"✗ Error parsing {command}: {e} (response: '{response_text}', attempt {attempt+1})")
                     except RuntimeError as e:
                         print(f"✗ Widget deleted for {command}: {e} (attempt {attempt+1})")
@@ -2106,6 +2115,57 @@ Serial Communication Log
             # Make sure to resume worker on error
             if self.serial_worker:
                 self.serial_worker.paused = False
+
+    def _debounce_call(self, handler_name, value):
+        """Store the last value for handler_name and (re)start a single-shot timer.
+
+        When the timer fires, _debounce_timeout will call the real handler with the
+        last stored value. This prevents frequent rapid calls to handlers.
+        """
+        try:
+            # Save last value
+            self._debounce_values[handler_name] = value
+
+            # If a timer already exists, restart it
+            timer = self._debounce_timers.get(handler_name)
+            if timer is not None:
+                timer.stop()
+                timer.start(self._debounce_interval_ms)
+                return
+
+            # Create a new single-shot QTimer
+            timer = QtCore.QTimer(self.main_window if self.main_window is not None else None)
+            timer.setSingleShot(True)
+            # Use a bound lambda to capture handler_name
+            timer.timeout.connect(lambda hn=handler_name: self._debounce_timeout(hn))
+            self._debounce_timers[handler_name] = timer
+            timer.start(self._debounce_interval_ms)
+        except Exception as e:
+            print(f"⚠ Error in _debounce_call for {handler_name}: {e}")
+
+    def _debounce_timeout(self, handler_name):
+        """Called when debounce timer fires; invokes the real handler with last value."""
+        try:
+            value = self._debounce_values.pop(handler_name, None)
+            timer = self._debounce_timers.pop(handler_name, None)
+            if timer is not None:
+                try:
+                    timer.stop()
+                except Exception:
+                    pass
+
+            if value is None:
+                return
+
+            handler = getattr(self, handler_name, None)
+            if handler is None:
+                print(f"⚠ Debounced handler '{handler_name}' not found")
+                return
+
+            # Call the original handler with the last value
+            handler(value)
+        except Exception as e:
+            print(f"✗ Exception in _debounce_timeout for {handler_name}: {e}")
 
 
 def main():
