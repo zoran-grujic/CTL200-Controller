@@ -93,10 +93,32 @@ class MyUi(Ui_MainWindow):
         # For serial communication
         self.my_serial = MySerial()
 
+        # Laser lock device (second serial device)
+        self.lock_serial = MySerial()
+        self.lock_serial.boxNamePrefix = "Laser lock by BGMAGLAB"  # Device identifier
+        self.lock_connected = False
+        self.lock_connection_attempts = 0
+        self.lock_max_attempts = 10  # Try 10 times before giving up
+        self.lock_retry_timer = None
+
         # Create the plot widget instance after proper setup
         self.plotWindow = None
         self.arbPlot = None
         self.plot_curve = None  # Store the plot curve reference
+
+        # Laser lock plot widgets
+        self.lockPlotWindow = None
+        self.lockPlot = None
+        self.lock_plot_curve = None
+
+        # Laser lock data storage for sweep mode
+        self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': []}
+        self.lock_sweep_in_progress = False
+        self.lock_data_buffer = ""  # Buffer for incomplete data packets
+        self.lock_monitoring_timer = None  # Timer for continuous monitoring
+        self.lock_range_change_timer = None  # Debounce timer for range changes
+        self.lock_pending_range = None  # Store pending range change
+        self.lock_last_sweep_range = None  # Track last sweep range to detect changes
 
         # Store main window reference for cleanup
         self.main_window = None
@@ -294,29 +316,125 @@ class MyUi(Ui_MainWindow):
             self.legend_text_actual = None
             self.legend_text_set = None
 
-        # Replace the plot placeholder with actual plot widget (now in Laser tab)
+        # Note: Temperature plot will be added to QSplitter later (see below)
+
+        # Create and setup laser lock plot widget
+        self.lockPlotWindow = pg.GraphicsLayoutWidget()
+        lock_PG_layout = pg.GraphicsLayout()
+        self.lockPlot = lock_PG_layout.addPlot()
+        self.lockPlot.setLabel('bottom', "DAC Raw")
+        self.lockPlot.setLabel('left', "ADC Raw")
+        self.lockPlot.setTitle("Laser Lock Sweep")
+        self.lockPlot.showGrid(x=True, y=True)
+        self.lockPlotWindow.setCentralItem(lock_PG_layout)
+
+        # Initialize the lock plot curve
+        self.lock_plot_curve = self.lockPlot.plot([], [], pen=pg.mkPen(color='#00FFFF', width=2), symbol='o', symbolSize=3)
+
+        # Set default axis ranges for the lock plot
+        self.lockPlot.setXRange(0, 65535, padding=0)
+        self.lockPlot.setYRange(0, 4095, padding=0)
+
+        # Enforce x-axis limits to 0..2^16 (65536) and disable auto-range
+        self.lockPlot.setLimits(xMin=0, xMax=65535)
+        self.lockPlot.enableAutoRange(axis='x', enable=False)
+
+        # Connect x-axis range change to sweep command
+        lock_vb = self.lockPlot.getViewBox()
+        lock_vb.sigRangeChanged.connect(self.on_lock_plot_range_changed)
+
+        # Sweep data will be monitored automatically - no buttons needed
+
+        # Create QSplitter to hold both plots with user-resizable divider
+        self.plotSplitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        self.plotSplitter.addWidget(self.plotWindow)      # Temperature plot (top)
+        self.plotSplitter.addWidget(self.lockPlotWindow)  # Lock sweep plot (bottom)
+
+        # Set initial sizes (equal split)
+        self.plotSplitter.setSizes([400, 400])
+
+        # Make splitter handle more visible and easier to grab
+        self.plotSplitter.setHandleWidth(6)
+        self.plotSplitter.setStyleSheet("""
+            QSplitter::handle {
+                background-color: #555555;
+                margin: 1px 0px;
+            }
+            QSplitter::handle:hover {
+                background-color: #777777;
+            }
+        """)
+
+        # Store splitter sizes for restoring when toggling visibility
+        self.plotSplitter_last_sizes = [400, 400]
+
+        # Create control buttons for plot visibility (optional - can be added to UI later)
+        # Users can also just drag the splitter to hide plots they don't need
+
+        # Replace one of the placeholders with the splitter containing both plots
+        # Try widget_plot_lock first, then PlotPlaceholder as fallback
+        plot_added = False
         try:
-            # Find the PlotPlaceholder widget and replace it with our plot
-            if hasattr(self, 'PlotPlaceholder') and self.PlotPlaceholder:
-                # Get the parent layout
-                parent_widget = self.PlotPlaceholder.parent()
+            if hasattr(self, 'widget_plot_lock') and self.widget_plot_lock:
+                parent_widget = self.widget_plot_lock.parent()
                 if parent_widget:
                     parent_layout = parent_widget.layout()
                     if parent_layout:
-                        # Find the placeholder in the layout
                         for i in range(parent_layout.count()):
                             item = parent_layout.itemAt(i)
-                            if item and item.widget() == self.PlotPlaceholder:
+                            if item and item.widget() == self.widget_plot_lock:
                                 # Remove placeholder
-                                parent_layout.removeWidget(self.PlotPlaceholder)
-                                self.PlotPlaceholder.hide()
-                                self.PlotPlaceholder.deleteLater()
-                                # Add plot widget at the same position
-                                parent_layout.insertWidget(i, self.plotWindow)
-                                print("✓ Temperature plot added to Laser tab")
+                                parent_layout.removeWidget(self.widget_plot_lock)
+                                self.widget_plot_lock.hide()
+                                self.widget_plot_lock.deleteLater()
+                                # Add splitter with both plots at the same position
+                                parent_layout.insertWidget(i, self.plotSplitter)
+                                print("✓ Both plots added to Laser Control tab (in splitter)")
+                                plot_added = True
                                 break
         except Exception as e:
-            print(f"✗ Error setting up temperature plot: {e}")
+            print(f"⚠ Could not replace widget_plot_lock: {e}")
+
+        # Fallback: try PlotPlaceholder if widget_plot_lock didn't work
+        if not plot_added:
+            try:
+                if hasattr(self, 'PlotPlaceholder') and self.PlotPlaceholder:
+                    parent_widget = self.PlotPlaceholder.parent()
+                    if parent_widget:
+                        parent_layout = parent_widget.layout()
+                        if parent_layout:
+                            for i in range(parent_layout.count()):
+                                item = parent_layout.itemAt(i)
+                                if item and item.widget() == self.PlotPlaceholder:
+                                    # Remove placeholder
+                                    parent_layout.removeWidget(self.PlotPlaceholder)
+                                    self.PlotPlaceholder.hide()
+                                    self.PlotPlaceholder.deleteLater()
+                                    # Add splitter with both plots
+                                    parent_layout.insertWidget(i, self.plotSplitter)
+                                    print("✓ Both plots added to Laser Control tab (in splitter)")
+                                    plot_added = True
+                                    break
+            except Exception as e:
+                print(f"⚠ Could not replace PlotPlaceholder: {e}")
+
+        if not plot_added:
+            print("✗ Error: Could not find placeholder to add plots")
+
+        # Remove the other placeholder if it still exists
+        try:
+            if hasattr(self, 'PlotPlaceholder') and self.PlotPlaceholder and not self.PlotPlaceholder.isHidden():
+                self.PlotPlaceholder.hide()
+                self.PlotPlaceholder.deleteLater()
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self, 'widget_plot_lock') and self.widget_plot_lock and not self.widget_plot_lock.isHidden():
+                self.widget_plot_lock.hide()
+                self.widget_plot_lock.deleteLater()
+        except Exception:
+            pass
 
         # Helper to replace a placeholder widget in its actual layout, preserving grid position
         def _replace_placeholder_widget(placeholder, new_widget):
@@ -509,6 +627,18 @@ class MyUi(Ui_MainWindow):
             self.pushButton_connectDisconnect.setText("Disconnect")  # Initial state - will try to connect
             self.pushButton_connectDisconnect.setEnabled(False)  # Disabled until initial connection attempt completes
 
+        # Connect laser lock PID controls
+        if hasattr(self, 'doubleSpinBox_lock_P'):
+            self.doubleSpinBox_lock_P.valueChanged.connect(self.on_lock_pid_changed)
+        if hasattr(self, 'doubleSpinBox_lock_P_2'):  # I gain
+            self.doubleSpinBox_lock_P_2.valueChanged.connect(self.on_lock_pid_changed)
+        if hasattr(self, 'doubleSpinBox_lock_P_3'):  # D gain
+            self.doubleSpinBox_lock_P_3.valueChanged.connect(self.on_lock_pid_changed)
+
+        # Disable lock controls initially (enabled when device connects)
+        if hasattr(self, 'groupBox_4'):
+            self.groupBox_4.setEnabled(False)
+
 
         # Communication log batching for performance
         self._log_buffer = []
@@ -672,6 +802,9 @@ Device is ready for operation.
         # 3. Start status polling at 1800ms (after all initialization is complete)
         QtCore.QTimer.singleShot(1800, lambda: self._start_status_polling())
 
+        # 4. Try to connect to laser lock device at 2200ms
+        QtCore.QTimer.singleShot(2200, lambda: self.connect_laser_lock_device())
+
     def _on_connection_failure(self):
         """Handle connection failure"""
         self.label_status.setText("Status: Connection failed")
@@ -731,7 +864,7 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
             # Apply laser current (ilaser)
             if 'ilaser' in laser_config:
                 ilaser = laser_config['ilaser']
-                send_and_clear(f"ilaser {ilaser:.6f}", f"ilaser={ilaser:.3f}mA")
+                send_and_clear(f"ilaser {ilaser:.1f}", f"ilaser={ilaser:.1f}mA")
                 # Update UI
                 self.doubleSpinBox_LaserCurrent.blockSignals(True)
                 self.doubleSpinBox_LaserCurrent.setValue(ilaser)
@@ -1477,9 +1610,20 @@ Serial Communication Log
             # Disconnect from device
             try:
                 self.my_serial.disconnect()
-                print("✓ Disconnected from device")
+                print("✓ Disconnected from CTL200 device")
             except Exception as e:
                 print(f"✗ Warning: Error during disconnect: {e}")
+
+        # Stop lock data monitoring and disconnect laser lock device if connected
+        if self.lock_connected:
+            try:
+                self._stop_lock_data_monitoring()
+                if self.lock_serial.box:
+                    self.lock_serial.box.close()
+                self.lock_connected = False
+                print("✓ Disconnected from laser lock device")
+            except Exception as e:
+                print(f"✗ Warning: Error disconnecting laser lock: {e}")
 
         # Accept the close event
         event.accept()
@@ -1623,22 +1767,22 @@ Serial Communication Log
             return
 
         try:
-            # Format command with 3 decimal places to match device precision
-            command = f"ilaser {value:.3f}"
-            print(f"ℹ Setting laser current to {value:.3f} mA...")
+            # Format command with 1 decimal place to match device precision
+            command = f"ilaser {value:.1f}"
+            print(f"ℹ Setting laser current to {value:.1f} mA...")
 
             if self.serial_worker:
                 # Queue command with verification
                 self.serial_worker.execute_command(
                     command=command,
                     verify_command="ilaser",
-                    expected_response=f"{value:.3f}"
+                    expected_response=f"{value:.1f}"
                 )
             else:
                 # Fallback to direct command if worker not available
                 self.my_serial.sendToBox(command)
                 time.sleep(0.1)
-                print(f"✓ Laser current set to {value:.3f} mA (no verification)")
+                print(f"✓ Laser current set to {value:.1f} mA (no verification)")
 
         except Exception as e:
             print(f"✗ Error setting laser current: {e}")
@@ -2085,6 +2229,427 @@ Serial Communication Log
             if hasattr(self, 'statusbar'):
                 self.statusbar.showMessage(f"Error saving settings: {e}", 5000)
 
+    def on_lock_pid_changed(self):
+        """Handle laser lock PID parameter changes"""
+        if not self.lock_connected:
+            return
+
+        try:
+            # Get PID values from spinboxes
+            p_val = self.doubleSpinBox_lock_P.value() if hasattr(self, 'doubleSpinBox_lock_P') else 0
+            i_val = self.doubleSpinBox_lock_P_2.value() if hasattr(self, 'doubleSpinBox_lock_P_2') else 0
+            d_val = self.doubleSpinBox_lock_P_3.value() if hasattr(self, 'doubleSpinBox_lock_P_3') else 0
+
+            # Send PID command to laser lock device
+            cmd = f"PID {p_val} {i_val} {d_val}"
+            response = self.send_lock_command(cmd)
+
+            if response:
+                print(f"✓ Laser lock PID updated: P={p_val}, I={i_val}, D={d_val}")
+
+        except Exception as e:
+            print(f"✗ Error updating laser lock PID: {e}")
+
+
+
+    def connect_laser_lock_device(self):
+        """
+        Connect to ESP32 laser lock device via serial port.
+        Tries last known port first, then scans all available ports.
+        """
+        try:
+            self.lock_connection_attempts += 1
+
+            # Only show search message on first attempt to reduce console spam
+            if self.lock_connection_attempts == 1:
+                print(f"Searching for ESP32 laser lock device...")
+
+            self._update_lock_connection_status(f"Searching... (attempt {self.lock_connection_attempts}/{self.lock_max_attempts})")
+
+            # Get available ports, excluding CTL200 port
+            available_ports = self.lock_serial.serial_ports()
+            ctl200_port = self.my_serial.port if self.my_serial.is_connected() else None
+            if ctl200_port:
+                available_ports = [p for p in available_ports if p != ctl200_port]
+
+            # Optimize search: try last known port first
+            last_lock_port = self.config.get("esp32_laser_lock", "last_port", "")
+            if last_lock_port and last_lock_port in available_ports:
+                available_ports.remove(last_lock_port)
+                available_ports.insert(0, last_lock_port)
+
+            # Scan ports to find the laser lock device
+            for port in available_ports:
+                try:
+                    import serial
+                    test_serial = serial.Serial(port, 115200, timeout=0.5)
+                    time.sleep(0.1)
+
+                    # Query device identity
+                    test_serial.write(b"whois?\n")
+                    time.sleep(0.1)
+
+                    # Check response
+                    response = ""
+                    if test_serial.in_waiting > 0:
+                        response = test_serial.read(test_serial.in_waiting).decode('utf-8', errors='ignore')
+
+                    # Verify device identity
+                    if "Laser lock by BGMAGLAB" in response:
+                        print(f"✓ ESP32 laser lock connected on {port}")
+
+                        # Store connection
+                        self.lock_serial.box = test_serial
+                        self.lock_serial.port = port
+                        self.lock_serial.connected = True
+                        self.lock_connected = True
+
+                        # Reset retry mechanism
+                        self.lock_connection_attempts = 0
+                        if self.lock_retry_timer:
+                            self.lock_retry_timer.stop()
+                            self.lock_retry_timer = None
+
+                        # Save port to config for next time
+                        from datetime import datetime
+                        self.config.set("esp32_laser_lock", "last_port", port)
+                        self.config.set("esp32_laser_lock", "last_connected", datetime.now().isoformat())
+                        self.config.save()
+
+                        self._update_lock_connection_status(f"✓ Connected on {port}")
+
+                        # Enable lock controls (on Laser Control tab)
+                        if hasattr(self, 'groupBox_4'):
+                            self.groupBox_4.setEnabled(True)
+
+                        # Read current PID values
+                        pid_response = self.send_lock_command("PID?")
+                        if pid_response and "PID?" not in pid_response:
+                            # Parse P I D values
+                            try:
+                                parts = pid_response.strip().split()
+                                if len(parts) >= 3:
+                                    if hasattr(self, 'doubleSpinBox_lock_P'):
+                                        self.doubleSpinBox_lock_P.setValue(float(parts[0]))
+                                    if hasattr(self, 'doubleSpinBox_lock_P_2'):
+                                        self.doubleSpinBox_lock_P_2.setValue(float(parts[1]))
+                                    if hasattr(self, 'doubleSpinBox_lock_P_3'):
+                                        self.doubleSpinBox_lock_P_3.setValue(float(parts[2]))
+                                    print(f"✓ Read PID values: P={parts[0]}, I={parts[1]}, D={parts[2]}")
+                            except Exception as e:
+                                print(f"⚠ Could not parse PID values: {e}")
+
+                        # Start automatic sweep data monitoring
+                        self._start_lock_data_monitoring()
+
+                        return True
+                    else:
+                        test_serial.close()
+
+                except Exception:
+                    # Silent failure - port unavailable or wrong device
+                    continue
+
+            # Schedule retry or report failure
+            if self.lock_connection_attempts < self.lock_max_attempts:
+                self._update_lock_connection_status(f"Not found. Retrying... ({self.lock_max_attempts - self.lock_connection_attempts} left)")
+
+                if not self.lock_retry_timer:
+                    self.lock_retry_timer = QtCore.QTimer()
+                    self.lock_retry_timer.setSingleShot(True)
+                    self.lock_retry_timer.timeout.connect(self.connect_laser_lock_device)
+                self.lock_retry_timer.start(3000)
+            else:
+                print(f"✗ ESP32 laser lock not found after {self.lock_max_attempts} attempts")
+                self._update_lock_connection_status(f"✗ Not found")
+
+            return False
+
+        except Exception as e:
+            print(f"✗ ESP32 laser lock connection error: {e}")
+
+            if self.lock_connection_attempts < self.lock_max_attempts:
+                self._update_lock_connection_status(f"Error. Retrying...")
+
+                if not self.lock_retry_timer:
+                    self.lock_retry_timer = QtCore.QTimer()
+                    self.lock_retry_timer.setSingleShot(True)
+                    self.lock_retry_timer.timeout.connect(self.connect_laser_lock_device)
+                self.lock_retry_timer.start(3000)
+            else:
+                self._update_lock_connection_status(f"✗ Connection failed")
+
+            return False
+
+    def _update_lock_connection_status(self, message):
+        """Update the ESP32 laser lock connection status display"""
+        try:
+            # For now, just use console output
+            # In the future, this could update a status label in the UI if one is added
+            status_line = f"[ESP32 Laser Lock] {message}"
+            print(status_line)
+        except Exception as e:
+            print(f"⚠ Error updating lock status: {e}")
+
+    def _start_lock_data_monitoring(self):
+        """Start continuous monitoring of laser lock device serial data"""
+        if not self.lock_connected:
+            return
+
+        print("ℹ Starting continuous sweep data monitoring...")
+
+        # Create a timer for continuous monitoring
+        self.lock_monitoring_timer = QtCore.QTimer()
+        self.lock_monitoring_timer.timeout.connect(self._monitor_lock_data)
+        self.lock_monitoring_timer.start(50)  # Check every 50ms
+
+    def _stop_lock_data_monitoring(self):
+        """Stop continuous monitoring of laser lock device"""
+        if self.lock_monitoring_timer:
+            self.lock_monitoring_timer.stop()
+            self.lock_monitoring_timer = None
+            print("ℹ Stopped sweep data monitoring")
+
+    def _monitor_lock_data(self):
+        """Continuously monitor laser lock serial port for sweep data"""
+        if not self.lock_connected or not self.lock_serial.box:
+            return
+
+        try:
+            # Check if data is available
+            if self.lock_serial.box.in_waiting > 0:
+                # Read available data
+                new_data = self.lock_serial.box.read(self.lock_serial.box.in_waiting).decode('utf-8', errors='ignore')
+
+                # Add to buffer
+                self.lock_data_buffer += new_data
+
+                # Process complete packets
+                self._process_lock_data_buffer()
+
+        except Exception as e:
+            print(f"✗ Error monitoring lock data: {e}")
+
+    def _process_lock_data_buffer(self):
+        """
+        Process buffered serial data and extract complete sweep packets.
+        Parses CSV format: Point,DAC_Raw,ADC_Raw
+        """
+        try:
+            # Detect sweep start marker from device
+            if "# Starting sweep" in self.lock_data_buffer and not self.lock_sweep_in_progress:
+                self.lock_sweep_in_progress = True
+                self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': []}
+
+            # If sweep is in progress, parse data lines
+            if self.lock_sweep_in_progress:
+                lines = self.lock_data_buffer.split('\n')
+
+                # Keep the last incomplete line in the buffer
+                self.lock_data_buffer = lines[-1]
+
+                # Process complete lines
+                for line in lines[:-1]:
+                    line = line.strip()
+
+                    # Skip headers and comments
+                    if line.startswith('#') or 'Point,DAC_Raw,ADC_Raw' in line or not line:
+                        continue
+
+                    # Parse data line: Point,DAC_Raw,ADC_Raw
+                    parts = line.split(',')
+                    if len(parts) == 3:
+                        try:
+                            point = int(parts[0])
+                            dac_raw = int(parts[1])
+                            adc_raw = int(parts[2])
+
+                            # Store data
+                            self.lock_sweep_data['Point'].append(point)
+                            self.lock_sweep_data['DAC_Raw'].append(dac_raw)
+                            self.lock_sweep_data['ADC_Raw'].append(adc_raw)
+
+                        except ValueError:
+                            pass  # Skip malformed lines
+
+                # Check for complete packet (200 points expected)
+                if len(self.lock_sweep_data['Point']) >= 200:
+                    self.lock_sweep_in_progress = False
+                    self.update_lock_plot()
+                    # Clear buffer after processing
+                    self.lock_data_buffer = ""
+
+        except Exception as e:
+            print(f"✗ Error processing lock data buffer: {e}")
+
+    def send_lock_command(self, command):
+        """Send command to ESP32 laser lock device and return response"""
+        if not self.lock_connected or not self.lock_serial.box:
+            print("✗ ESP32 laser lock device not connected")
+            return None
+
+        try:
+            # Don't clear buffer during monitoring - we might lose sweep data
+            # Only flush if not collecting sweep data
+            if not self.lock_sweep_in_progress:
+                self.lock_serial.box.flushInput()
+
+            # Send command
+            cmd = command.strip() + "\n"
+            self.lock_serial.box.write(cmd.encode('utf-8'))
+            time.sleep(0.1)
+
+            # Read response only if not in sweep mode
+            response = ""
+            if not self.lock_sweep_in_progress and self.lock_serial.box.in_waiting > 0:
+                response = self.lock_serial.box.read(self.lock_serial.box.in_waiting).decode('utf-8', errors='ignore')
+                print(f"Lock CMD: {command} -> {response.strip()}")
+
+            return response
+
+        except Exception as e:
+            print(f"✗ Error sending command to laser lock: {e}")
+            return None
+
+    def start_sweep(self, start_val, stop_val):
+        """
+        Initiate sweep measurement on ESP32 laser lock device.
+        Clears buffers and sends command to device. Plot updates when data arrives.
+        """
+        if not self.lock_connected:
+            return
+
+        try:
+            # Clear data structures to prevent contamination from previous sweep
+            self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': []}
+            self.lock_data_buffer = ""
+            self.lock_sweep_in_progress = False  # Set True when device responds
+            self.lock_last_sweep_range = (start_val, stop_val)
+
+            # Send sweep command to device
+            self.send_lock_command(f"sweep {start_val} {stop_val}")
+
+        except Exception as e:
+            print(f"✗ Sweep error: {e}")
+            self.lock_sweep_in_progress = False
+
+    def on_lock_plot_range_changed(self):
+        """
+        Handle x-axis range change (zoom/pan) on lock plot.
+        Debounces rapid changes - waits 500ms after user stops interaction.
+        """
+        try:
+            if not self.lock_connected:
+                return
+
+            # Get visible x-axis range and clamp to valid DAC range (0-65535)
+            view_range = self.lockPlot.getViewBox().viewRange()
+            x_min, x_max = view_range[0]
+            start_val = int(max(0, min(65535, x_min)))
+            stop_val = int(max(0, min(65535, x_max)))
+
+            if stop_val > start_val:
+                self.lock_pending_range = (start_val, stop_val)
+
+                # Reset debounce timer on each change
+                if self.lock_range_change_timer:
+                    self.lock_range_change_timer.stop()
+
+                if not self.lock_range_change_timer:
+                    self.lock_range_change_timer = QtCore.QTimer()
+                    self.lock_range_change_timer.setSingleShot(True)
+                    self.lock_range_change_timer.timeout.connect(self._execute_pending_sweep)
+
+                self.lock_range_change_timer.start(500)  # Wait 500ms
+
+        except Exception as e:
+            print(f"✗ Range change error: {e}")
+
+    def _execute_pending_sweep(self):
+        """Execute sweep command after debounce period expires"""
+        try:
+            if self.lock_pending_range and self.lock_connected:
+                start_val, stop_val = self.lock_pending_range
+                self.start_sweep(start_val, stop_val)
+                self.lock_pending_range = None
+        except Exception as e:
+            print(f"✗ Error executing pending sweep: {e}")
+
+    def update_lock_plot(self):
+        """
+        Update lock plot with new sweep data.
+        Temporarily blocks range change signals to prevent triggering new sweeps during update.
+        Skips first data point as it's often unreliable.
+        """
+        try:
+            if self.lock_plot_curve and len(self.lock_sweep_data['DAC_Raw']) > 1:
+                lock_vb = self.lockPlot.getViewBox()
+                lock_vb.sigRangeChanged.disconnect(self.on_lock_plot_range_changed)
+
+                self.lockPlot.setLimits(xMin=0, xMax=65535)
+
+                # Skip first point (often unreliable), plot DAC_Raw vs ADC_Raw
+                self.lock_plot_curve.setData(
+                    self.lock_sweep_data['DAC_Raw'][1:],
+                    self.lock_sweep_data['ADC_Raw'][1:]
+                )
+
+                lock_vb.sigRangeChanged.connect(self.on_lock_plot_range_changed)
+
+        except Exception as e:
+            print(f"✗ Plot update error: {e}")
+            # Ensure signal reconnection even on error
+            try:
+                lock_vb = self.lockPlot.getViewBox()
+                lock_vb.sigRangeChanged.disconnect(self.on_lock_plot_range_changed)
+                lock_vb.sigRangeChanged.connect(self.on_lock_plot_range_changed)
+            except:
+                pass
+
+    def toggle_plot_splitter_orientation(self):
+        """Toggle splitter orientation between vertical (stacked) and horizontal (side-by-side)"""
+        try:
+            if self.plotSplitter.orientation() == QtCore.Qt.Orientation.Vertical:
+                self.plotSplitter.setOrientation(QtCore.Qt.Orientation.Horizontal)
+                print("ℹ Plot orientation: Horizontal (side-by-side)")
+            else:
+                self.plotSplitter.setOrientation(QtCore.Qt.Orientation.Vertical)
+                print("ℹ Plot orientation: Vertical (stacked)")
+        except Exception as e:
+            print(f"✗ Error toggling plot orientation: {e}")
+
+    def toggle_temperature_plot_visibility(self):
+        """Toggle temperature plot visibility in splitter"""
+        try:
+            if self.plotWindow.isVisible():
+                # Save current sizes before hiding
+                self.plotSplitter_last_sizes = self.plotSplitter.sizes()
+                self.plotWindow.hide()
+                print("ℹ Temperature plot hidden")
+            else:
+                self.plotWindow.show()
+                # Restore saved sizes
+                self.plotSplitter.setSizes(self.plotSplitter_last_sizes)
+                print("ℹ Temperature plot shown")
+        except Exception as e:
+            print(f"✗ Error toggling temperature plot: {e}")
+
+    def toggle_lock_plot_visibility(self):
+        """Toggle lock plot visibility in splitter"""
+        try:
+            if self.lockPlotWindow.isVisible():
+                # Save current sizes before hiding
+                self.plotSplitter_last_sizes = self.plotSplitter.sizes()
+                self.lockPlotWindow.hide()
+                print("ℹ Lock plot hidden")
+            else:
+                self.lockPlotWindow.show()
+                # Restore saved sizes
+                self.plotSplitter.setSizes(self.plotSplitter_last_sizes)
+                print("ℹ Lock plot shown")
+        except Exception as e:
+            print(f"✗ Error toggling lock plot: {e}")
+
     def on_tab_changed(self, index):
         """Handle tab change event - read device values when tabs are activated"""
         if not self.my_serial.is_connected():
@@ -2355,13 +2920,31 @@ Serial Communication Log
 
 
 def main():
+    # Fix Windows taskbar icon - must be set before QApplication is created
+    if sys.platform == 'win32':
+        import ctypes
+        # Set AppUserModelID to make Windows treat this as a unique application
+        myappid = 'zoran.ctl200controller.1.0'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
     app = QtWidgets.QApplication(sys.argv)
     # Apply PyQt6-compatible dark theme
     app.setStyleSheet(qdarktheme.load_stylesheet())
 
+    # Set application icon
+    icon_path = os.path.join(os.path.dirname(__file__), 'images', '-Speach-Bubble-256x256-icon.ico')
+    if os.path.exists(icon_path):
+        app_icon = QtGui.QIcon(icon_path)
+        app.setWindowIcon(app_icon)  # Set on application level
+
     MainWindow = QtWidgets.QMainWindow()
     ui = MyUi()
     ui.setupUi(MainWindow)
+
+    # Set icon on the main window as well
+    if os.path.exists(icon_path):
+        MainWindow.setWindowIcon(QtGui.QIcon(icon_path))
+
     MainWindow.showMaximized()
 
     sys.exit(app.exec())

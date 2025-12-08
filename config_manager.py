@@ -61,6 +61,10 @@ class ConfigManager:
                 "serial_number": "",
                 "last_connected": ""
             },
+            "esp32_laser_lock": {
+                "last_port": "",
+                "last_connected": ""
+            },
             "ui": {
                 "window_maximized": True,
                 "last_tab": 0

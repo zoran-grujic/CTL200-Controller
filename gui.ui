@@ -22,27 +22,139 @@
       </property>
       <widget class="QWidget" name="tabLaserControll">
        <attribute name="title">
-        <string>Laser</string>
+        <string>Laser controll</string>
        </attribute>
        <layout class="QVBoxLayout" name="verticalLayout">
         <item>
          <layout class="QGridLayout" name="gridLayout_2">
-          <item row="0" column="2">
+          <item row="0" column="1">
+           <widget class="QGroupBox" name="groupBox">
+            <property name="title">
+             <string>Basic laser controll</string>
+            </property>
+            <layout class="QGridLayout" name="gridLayout_6">
+             <item row="1" column="0">
+              <widget class="QCheckBox" name="checkBox_TECEnable">
+               <property name="toolTip">
+                <string>Enable/disable TEC</string>
+               </property>
+               <property name="text">
+                <string>Enable TEC</string>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="0">
+              <widget class="QLabel" name="label_4">
+               <property name="text">
+                <string>Set laser current</string>
+               </property>
+              </widget>
+             </item>
+             <item row="0" column="0">
+              <widget class="QCheckBox" name="checkBox_LaserEnable">
+               <property name="toolTip">
+                <string>Enable/disable laser output</string>
+               </property>
+               <property name="text">
+                <string>Laser ON/OFF</string>
+               </property>
+              </widget>
+             </item>
+             <item row="1" column="2">
+              <layout class="QGridLayout" name="gridLayout_4">
+               <item row="0" column="0">
+                <widget class="QLabel" name="label_TECCurrent_mA">
+                 <property name="text">
+                  <string>TextLabel</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="0">
+                <widget class="QLabel" name="label_thermistorR">
+                 <property name="text">
+                  <string>TextLabel</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </item>
+             <item row="1" column="1">
+              <layout class="QGridLayout" name="gridLayout_3">
+               <item row="0" column="0" alignment="Qt::AlignRight">
+                <widget class="QLabel" name="label">
+                 <property name="text">
+                  <string>TEC current:</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="0" alignment="Qt::AlignRight">
+                <widget class="QLabel" name="label_3">
+                 <property name="text">
+                  <string>Temperature:</string>
+                 </property>
+                </widget>
+               </item>
+              </layout>
+             </item>
+             <item row="0" column="1" alignment="Qt::AlignRight">
+              <widget class="QLabel" name="label_2">
+               <property name="text">
+                <string>Laser current:</string>
+               </property>
+              </widget>
+             </item>
+             <item row="0" column="2">
+              <widget class="QLabel" name="label_LaserCurrent_mA">
+               <property name="text">
+                <string>TextLabel</string>
+               </property>
+              </widget>
+             </item>
+             <item row="3" column="0">
+              <widget class="QLabel" name="label_5">
+               <property name="text">
+                <string>Set temperature</string>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="1">
+              <widget class="QDoubleSpinBox" name="doubleSpinBox_LaserCurrent">
+               <property name="suffix">
+                <string> mA</string>
+               </property>
+               <property name="decimals">
+                <number>1</number>
+               </property>
+               <property name="maximum">
+                <double>200.000000000000000</double>
+               </property>
+               <property name="singleStep">
+                <double>0.100000000000000</double>
+               </property>
+              </widget>
+             </item>
+             <item row="3" column="1">
+              <widget class="QDoubleSpinBox" name="doubleSpinBox_SetTemperature">
+               <property name="suffix">
+                <string> Ohm</string>
+               </property>
+               <property name="maximum">
+                <double>15000.000000000000000</double>
+               </property>
+               <property name="value">
+                <double>10000.000000000000000</double>
+               </property>
+              </widget>
+             </item>
+            </layout>
+           </widget>
+          </item>
+          <item row="0" column="3">
            <widget class="QGroupBox" name="groupBox_2">
             <property name="title">
              <string>Modulation controll</string>
             </property>
             <layout class="QGridLayout" name="gridLayout_8">
-             <item row="0" column="0">
-              <widget class="QCheckBox" name="checkBox_ain1Enable">
-               <property name="toolTip">
-                <string>Enable laser current modulation over ain1 input</string>
-               </property>
-               <property name="text">
-                <string>Enable ain1 curr. mod.</string>
-               </property>
-              </widget>
-             </item>
              <item row="1" column="0">
               <widget class="QCheckBox" name="checkBox_ain2Enable">
                <property name="toolTip">
@@ -75,10 +187,13 @@
                </property>
               </widget>
              </item>
-             <item row="0" column="1" alignment="Qt::AlignRight">
-              <widget class="QLabel" name="label_6">
+             <item row="0" column="0">
+              <widget class="QCheckBox" name="checkBox_ain1Enable">
+               <property name="toolTip">
+                <string>Enable laser current modulation over ain1 input</string>
+               </property>
                <property name="text">
-                <string>Curr. mod. gain</string>
+                <string>Enable ain1 curr. mod.</string>
                </property>
               </widget>
              </item>
@@ -86,6 +201,13 @@
               <widget class="QLabel" name="label_7">
                <property name="text">
                 <string>Temp. mod. gain</string>
+               </property>
+              </widget>
+             </item>
+             <item row="0" column="1" alignment="Qt::AlignRight">
+              <widget class="QLabel" name="label_6">
+               <property name="text">
+                <string>Curr. mod. gain</string>
                </property>
               </widget>
              </item>
@@ -114,7 +236,7 @@
             </layout>
            </widget>
           </item>
-          <item row="0" column="3">
+          <item row="0" column="4">
            <widget class="QGroupBox" name="groupBox_3">
             <property name="title">
              <string>Temperature PID </string>
@@ -297,129 +419,60 @@
             </layout>
            </widget>
           </item>
-          <item row="0" column="1">
-           <widget class="QGroupBox" name="groupBox">
+          <item row="0" column="2">
+           <widget class="QGroupBox" name="groupBox_4">
             <property name="title">
-             <string>Basic laser controll</string>
+             <string>PID for lock</string>
             </property>
-            <layout class="QGridLayout" name="gridLayout_6">
-             <item row="1" column="0">
-              <widget class="QCheckBox" name="checkBox_TECEnable">
-               <property name="toolTip">
-                <string>Enable/disable TEC</string>
-               </property>
-               <property name="text">
-                <string>Enable TEC</string>
-               </property>
-              </widget>
-             </item>
-             <item row="2" column="0">
-              <widget class="QLabel" name="label_4">
-               <property name="text">
-                <string>Set laser current</string>
-               </property>
-              </widget>
-             </item>
+            <layout class="QGridLayout" name="gridLayout_10">
              <item row="0" column="0">
-              <widget class="QCheckBox" name="checkBox_LaserEnable">
-               <property name="toolTip">
-                <string>Enable/disable laser output</string>
-               </property>
-               <property name="text">
-                <string>Laser ON/OFF</string>
-               </property>
-              </widget>
-             </item>
-             <item row="1" column="2">
-              <layout class="QGridLayout" name="gridLayout_4">
+              <layout class="QGridLayout" name="gridLayout_9">
                <item row="0" column="0">
-                <widget class="QLabel" name="label_TECCurrent_mA">
+                <widget class="QLabel" name="label_8">
                  <property name="text">
-                  <string>TextLabel</string>
+                  <string>P</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="2" column="0">
+                <widget class="QLabel" name="label_10">
+                 <property name="text">
+                  <string>D</string>
                  </property>
                 </widget>
                </item>
                <item row="1" column="0">
-                <widget class="QLabel" name="label_thermistorR">
+                <widget class="QLabel" name="label_9">
                  <property name="text">
-                  <string>TextLabel</string>
+                  <string>I</string>
                  </property>
                 </widget>
+               </item>
+               <item row="0" column="1">
+                <widget class="QDoubleSpinBox" name="doubleSpinBox_lock_P"/>
+               </item>
+               <item row="3" column="1">
+                <widget class="QCheckBox" name="checkBox">
+                 <property name="text">
+                  <string>Invert PID</string>
+                 </property>
+                </widget>
+               </item>
+               <item row="1" column="1">
+                <widget class="QDoubleSpinBox" name="doubleSpinBox_lock_P_2"/>
+               </item>
+               <item row="2" column="1">
+                <widget class="QDoubleSpinBox" name="doubleSpinBox_lock_P_3"/>
                </item>
               </layout>
-             </item>
-             <item row="1" column="1">
-              <layout class="QGridLayout" name="gridLayout_3">
-               <item row="0" column="0" alignment="Qt::AlignRight">
-                <widget class="QLabel" name="label">
-                 <property name="text">
-                  <string>TEC current:</string>
-                 </property>
-                </widget>
-               </item>
-               <item row="1" column="0" alignment="Qt::AlignRight">
-                <widget class="QLabel" name="label_3">
-                 <property name="text">
-                  <string>Temperature:</string>
-                 </property>
-                </widget>
-               </item>
-              </layout>
-             </item>
-             <item row="0" column="1" alignment="Qt::AlignRight">
-              <widget class="QLabel" name="label_2">
-               <property name="text">
-                <string>Laser current:</string>
-               </property>
-              </widget>
-             </item>
-             <item row="0" column="2">
-              <widget class="QLabel" name="label_LaserCurrent_mA">
-               <property name="text">
-                <string>TextLabel</string>
-               </property>
-              </widget>
-             </item>
-             <item row="3" column="0">
-              <widget class="QLabel" name="label_5">
-               <property name="text">
-                <string>Set temperature</string>
-               </property>
-              </widget>
-             </item>
-             <item row="2" column="1">
-              <widget class="QDoubleSpinBox" name="doubleSpinBox_LaserCurrent">
-               <property name="suffix">
-                <string> mA</string>
-               </property>
-               <property name="decimals">
-                <number>3</number>
-               </property>
-               <property name="maximum">
-                <double>200.000000000000000</double>
-               </property>
-               <property name="singleStep">
-                <double>0.100000000000000</double>
-               </property>
-              </widget>
-             </item>
-             <item row="3" column="1">
-              <widget class="QDoubleSpinBox" name="doubleSpinBox_SetTemperature">
-               <property name="suffix">
-                <string> Ohm</string>
-               </property>
-               <property name="maximum">
-                <double>15000.000000000000000</double>
-               </property>
-               <property name="value">
-                <double>10000.000000000000000</double>
-               </property>
-              </widget>
              </item>
             </layout>
            </widget>
           </item>
          </layout>
+        </item>
+        <item>
+         <widget class="QWidget" name="widget_plot_lock" native="true"/>
         </item>
         <item>
          <widget class="QWidget" name="PlotPlaceholder" native="true"/>
