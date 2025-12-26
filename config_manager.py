@@ -65,6 +65,12 @@ class ConfigManager:
                 "last_port": "",
                 "last_connected": ""
             },
+            "laser_lock_pid": {
+                "p": 0.0,
+                "i": 0.0,
+                "d": 0.0,
+                "invert_pid": False
+            },
             "ui": {
                 "window_maximized": True,
                 "last_tab": 0
@@ -203,6 +209,22 @@ class ConfigManager:
         for key, value in kwargs.items():
             if key in self.config["tec"]:
                 self.config["tec"][key] = value
+        self.save()
+
+    def get_laser_lock_pid_config(self):
+        """Get laser lock PID configuration"""
+        return self.config["laser_lock_pid"]
+
+    def set_laser_lock_pid_config(self, **kwargs):
+        """
+        Set laser lock PID configuration
+
+        Args:
+            **kwargs: Laser lock PID parameters (p, i, d, invert_pid)
+        """
+        for key, value in kwargs.items():
+            if key in self.config["laser_lock_pid"]:
+                self.config["laser_lock_pid"][key] = value
         self.save()
 
     def reset_to_defaults(self):

@@ -4,6 +4,7 @@ import qdarktheme  # PyQt6-compatible dark theme, pip install pyqtdarktheme
 import numpy as np
 import time
 import collections
+import re
 
 # Configure PyQtGraph to use PyQt6 BEFORE importing it
 import os
@@ -97,6 +98,7 @@ class MyUi(Ui_MainWindow):
         self.lock_serial = MySerial()
         self.lock_serial.boxNamePrefix = "Laser lock by BGMAGLAB"  # Device identifier
         self.lock_connected = False
+        self.lock_is_locked = False  # Track if device is in locked state (vs sweep mode)
         self.lock_connection_attempts = 0
         self.lock_max_attempts = 10  # Try 10 times before giving up
         self.lock_retry_timer = None
@@ -110,6 +112,9 @@ class MyUi(Ui_MainWindow):
         self.lockPlotWindow = None
         self.lockPlot = None
         self.lock_plot_curve = None
+        self.lock_vLine = None  # Vertical crosshair line
+        self.lock_hLine = None  # Horizontal crosshair line
+        self.lock_values_text = None  # Text item for displaying lock values
 
         # Laser lock data storage for sweep mode
         self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': []}
@@ -118,7 +123,20 @@ class MyUi(Ui_MainWindow):
         self.lock_monitoring_timer = None  # Timer for continuous monitoring
         self.lock_range_change_timer = None  # Debounce timer for range changes
         self.lock_pending_range = None  # Store pending range change
+        self.lock_csv_pattern = re.compile(r'^\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*$')  # Validate CSV format
         self.lock_last_sweep_range = None  # Track last sweep range to detect changes
+        self.lock_received_points = set()  # Track received point indices for reporting
+
+        # Laser lock error data storage (when locked to a point)
+        self.lock_error_data = []  # Store last 200 error values
+        self.lock_error_x_data = []  # Store last 200 x values
+        self.lock_error_y_data = []  # Store last 200 y values
+        self.lock_error_plot_curve = None  # Curve for plotting error data
+        self.lock_error_counter = 0  # Counter for x-axis in error plot
+        self.lock_initial_dac = 0  # Initial DAC value when lock was initiated
+        self.lock_initial_adc = 0  # Initial ADC value when lock was initiated
+        self.lock_sweep_start = 0  # Sweep start value to restore after unlock
+        self.lock_sweep_stop = 65535  # Sweep stop value to restore after unlock
 
         # Store main window reference for cleanup
         self.main_window = None
@@ -330,6 +348,26 @@ class MyUi(Ui_MainWindow):
 
         # Initialize the lock plot curve
         self.lock_plot_curve = self.lockPlot.plot([], [], pen=pg.mkPen(color='#00FFFF', width=2), symbol='o', symbolSize=3)
+
+        # Initialize the error plot curve (for locked mode - display error values)
+        self.lock_error_plot_curve = self.lockPlot.plot([], [], pen=pg.mkPen(color='#FF0000', width=2), name='Lock Error')
+
+        # Add crosshair lines for mouse tracking
+        self.lock_vLine = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen(color='y', width=1, style=QtCore.Qt.PenStyle.DashLine))
+        self.lock_hLine = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(color='y', width=1, style=QtCore.Qt.PenStyle.DashLine))
+        self.lockPlot.addItem(self.lock_vLine, ignoreBounds=True)
+        self.lockPlot.addItem(self.lock_hLine, ignoreBounds=True)
+
+        # Connect mouse move event for crosshair
+        self.lockPlot.scene().sigMouseMoved.connect(self.on_lock_plot_mouse_moved)
+
+        # Connect middle mouse button click for lock command
+        self.lockPlot.scene().sigMouseClicked.connect(self.on_lock_plot_clicked)
+
+        # Add text item for displaying lock values (top right corner)
+        self.lock_values_text = pg.TextItem(text="", anchor=(1, 0), color='w', fill=(0, 0, 0, 128))
+        self.lockPlot.addItem(self.lock_values_text, ignoreBounds=True)
+        self.lock_values_text.setPos(65535, 4095)  # Position at top right
 
         # Set default axis ranges for the lock plot
         self.lockPlot.setXRange(0, 65535, padding=0)
@@ -634,6 +672,8 @@ class MyUi(Ui_MainWindow):
             self.doubleSpinBox_lock_P_2.valueChanged.connect(self.on_lock_pid_changed)
         if hasattr(self, 'doubleSpinBox_lock_P_3'):  # D gain
             self.doubleSpinBox_lock_P_3.valueChanged.connect(self.on_lock_pid_changed)
+        if hasattr(self, 'checkBox_invertPID'):  # Invert PID checkbox
+            self.checkBox_invertPID.stateChanged.connect(self.on_lock_pid_changed)
 
         # Disable lock controls initially (enabled when device connects)
         if hasattr(self, 'groupBox_4'):
@@ -994,6 +1034,37 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
                     self.doubleSpinBox_vtmin.blockSignals(True)
                     self.doubleSpinBox_vtmin.setValue(vtmin)
                     self.doubleSpinBox_vtmin.blockSignals(False)
+
+            # Load laser lock PID settings (UI only, not sent to device at startup)
+            lock_pid_config = self.config.get_laser_lock_pid_config()
+            if lock_pid_config:
+                # Update P gain
+                if 'p' in lock_pid_config and hasattr(self, 'doubleSpinBox_lock_P'):
+                    self.doubleSpinBox_lock_P.blockSignals(True)
+                    self.doubleSpinBox_lock_P.setValue(lock_pid_config['p'])
+                    self.doubleSpinBox_lock_P.blockSignals(False)
+                    print(f"ℹ Loaded lock P={lock_pid_config['p']:.6f}")
+
+                # Update I gain
+                if 'i' in lock_pid_config and hasattr(self, 'doubleSpinBox_lock_P_2'):
+                    self.doubleSpinBox_lock_P_2.blockSignals(True)
+                    self.doubleSpinBox_lock_P_2.setValue(lock_pid_config['i'])
+                    self.doubleSpinBox_lock_P_2.blockSignals(False)
+                    print(f"ℹ Loaded lock I={lock_pid_config['i']:.6f}")
+
+                # Update D gain
+                if 'd' in lock_pid_config and hasattr(self, 'doubleSpinBox_lock_P_3'):
+                    self.doubleSpinBox_lock_P_3.blockSignals(True)
+                    self.doubleSpinBox_lock_P_3.setValue(lock_pid_config['d'])
+                    self.doubleSpinBox_lock_P_3.blockSignals(False)
+                    print(f"ℹ Loaded lock D={lock_pid_config['d']:.6f}")
+
+                # Update Invert PID checkbox
+                if 'invert_pid' in lock_pid_config and hasattr(self, 'checkBox_invertPID'):
+                    self.checkBox_invertPID.blockSignals(True)
+                    self.checkBox_invertPID.setChecked(lock_pid_config['invert_pid'])
+                    self.checkBox_invertPID.blockSignals(False)
+                    print(f"ℹ Loaded lock Invert PID={lock_pid_config['invert_pid']}")
 
             print(f"✓ Settings applied: {', '.join(settings_applied)}")
 
@@ -2219,7 +2290,30 @@ Serial Communication Log
                 vtmin=vtmin
             )
 
-            print(f"✓ Settings saved: Laser={laser_current:.3f}mA, Temp={temperature_setpoint:.3f}Ω, P={p_gain:.6f}, I={i_gain:.6f}, D={d_gain:.6f}, ain1={ain1_enable}, ain1_gain={ain1_curr_gain:.6f}, ain2={ain2_enable}, ain2_gain={ain2_temp_gain:.6f}")
+            # Get and save laser lock PID settings
+            lock_p = 0.0
+            lock_i = 0.0
+            lock_d = 0.0
+            lock_invert = False
+
+            if hasattr(self, 'doubleSpinBox_lock_P'):
+                lock_p = self.doubleSpinBox_lock_P.value()
+            if hasattr(self, 'doubleSpinBox_lock_P_2'):
+                lock_i = self.doubleSpinBox_lock_P_2.value()
+            if hasattr(self, 'doubleSpinBox_lock_P_3'):
+                lock_d = self.doubleSpinBox_lock_P_3.value()
+            if hasattr(self, 'checkBox_invertPID'):
+                lock_invert = self.checkBox_invertPID.isChecked()
+
+            # Save laser lock PID settings
+            self.config.set_laser_lock_pid_config(
+                p=lock_p,
+                i=lock_i,
+                d=lock_d,
+                invert_pid=lock_invert
+            )
+
+            print(f"✓ Settings saved: Laser={laser_current:.3f}mA, Temp={temperature_setpoint:.3f}Ω, P={p_gain:.6f}, I={i_gain:.6f}, D={d_gain:.6f}, ain1={ain1_enable}, ain1_gain={ain1_curr_gain:.6f}, ain2={ain2_enable}, ain2_gain={ain2_temp_gain:.6f}, Lock PID: P={lock_p:.6f}, I={lock_i:.6f}, D={lock_d:.6f}, Invert={lock_invert}")
 
             if hasattr(self, 'statusbar'):
                 self.statusbar.showMessage("Settings saved to config file", 3000)
@@ -2230,7 +2324,7 @@ Serial Communication Log
                 self.statusbar.showMessage(f"Error saving settings: {e}", 5000)
 
     def on_lock_pid_changed(self):
-        """Handle laser lock PID parameter changes"""
+        """Handle laser lock PID parameter changes (including invert checkbox)"""
         if not self.lock_connected:
             return
 
@@ -2239,13 +2333,27 @@ Serial Communication Log
             p_val = self.doubleSpinBox_lock_P.value() if hasattr(self, 'doubleSpinBox_lock_P') else 0
             i_val = self.doubleSpinBox_lock_P_2.value() if hasattr(self, 'doubleSpinBox_lock_P_2') else 0
             d_val = self.doubleSpinBox_lock_P_3.value() if hasattr(self, 'doubleSpinBox_lock_P_3') else 0
+            
+            # Get invert state from checkbox
+            invert = self.checkBox_invertPID.isChecked() if hasattr(self, 'checkBox_invertPID') else False
 
-            # Send PID command to laser lock device
-            cmd = f"PID {p_val} {i_val} {d_val}"
+            # Convert to integers and apply inversion by negating P, I, D if invert is checked
+            p_int = int(p_val)
+            i_int = int(i_val)
+            d_int = int(d_val)
+
+            if invert:
+                p_int = -p_int
+                i_int = -i_int
+                d_int = -d_int
+
+            # Send PID command to laser lock device (as integers)
+            cmd = f"PID {p_int} {i_int} {d_int}"
             response = self.send_lock_command(cmd)
 
             if response:
-                print(f"✓ Laser lock PID updated: P={p_val}, I={i_val}, D={d_val}")
+                invert_str = " (inverted)" if invert else ""
+                print(f"✓ Laser lock PID updated{invert_str}: P={p_int}, I={i_int}, D={d_int}")
 
         except Exception as e:
             print(f"✗ Error updating laser lock PID: {e}")
@@ -2322,24 +2430,92 @@ Serial Communication Log
                         if hasattr(self, 'groupBox_4'):
                             self.groupBox_4.setEnabled(True)
 
-                        # Read current PID values
-                        pid_response = self.send_lock_command("PID?")
-                        if pid_response and "PID?" not in pid_response:
-                            # Parse P I D values
-                            try:
-                                parts = pid_response.strip().split()
-                                if len(parts) >= 3:
-                                    if hasattr(self, 'doubleSpinBox_lock_P'):
-                                        self.doubleSpinBox_lock_P.setValue(float(parts[0]))
-                                    if hasattr(self, 'doubleSpinBox_lock_P_2'):
-                                        self.doubleSpinBox_lock_P_2.setValue(float(parts[1]))
-                                    if hasattr(self, 'doubleSpinBox_lock_P_3'):
-                                        self.doubleSpinBox_lock_P_3.setValue(float(parts[2]))
-                                    print(f"✓ Read PID values: P={parts[0]}, I={parts[1]}, D={parts[2]}")
-                            except Exception as e:
-                                print(f"⚠ Could not parse PID values: {e}")
+                        # Query lock state to determine mode
+                        # Send 'lock?' command and check the response format:
+                        # - If locked: responds with "0" or "1" (or similar status)
+                        # - If unlocked/sweep: no meaningful response or empty
+                        lock_state_response = self.send_lock_command("lock?")
+                        print(f"ℹ Lock state query response: '{lock_state_response.strip() if lock_state_response else 'None'}'")
 
-                        # Start automatic sweep data monitoring
+                        # Check if response indicates locked state (0 = unlocked, 1 = locked, or similar)
+                        is_locked = False
+                        if lock_state_response and lock_state_response.strip():
+                            try:
+                                # Try to parse as integer (0=unlocked, 1=locked)
+                                lock_value = int(lock_state_response.strip())
+                                is_locked = (lock_value == 1)
+                            except ValueError:
+                                # If not a simple integer, check for specific text
+                                response_lower = lock_state_response.strip().lower()
+                                is_locked = ("locked" in response_lower and "unlocked" not in response_lower)
+
+                        if not is_locked:
+                            # Device is in unlocked/sweep mode
+                            print("ℹ Device is unlocked - entering sweep mode")
+                            self.lock_is_locked = False
+
+                            # Send current PID parameters from UI
+                            p_val = 0
+                            i_val = 0
+                            d_val = 0
+                            if hasattr(self, 'doubleSpinBox_lock_P'):
+                                p_val = int(self.doubleSpinBox_lock_P.value())
+                            if hasattr(self, 'doubleSpinBox_lock_P_2'):
+                                i_val = int(self.doubleSpinBox_lock_P_2.value())
+                            if hasattr(self, 'doubleSpinBox_lock_P_3'):
+                                d_val = int(self.doubleSpinBox_lock_P_3.value())
+
+                            # Apply inversion if checkbox is checked
+                            if hasattr(self, 'checkBox_invertPID') and self.checkBox_invertPID.isChecked():
+                                p_val = -p_val
+                                i_val = -i_val
+                                d_val = -d_val
+
+                            # Send PID command
+                            self.send_lock_command(f"PID {p_val} {i_val} {d_val}")
+                            print(f"✓ Sent PID values: P={p_val}, I={i_val}, D={d_val}")
+
+                            # Start sweep with full range
+                            self.send_lock_command("sweep 0 65535")
+                            print("ℹ Started full range sweep (0-65535)")
+
+                        else:
+                            # Device is locked - read current PID values
+                            print("ℹ Device is locked - reading PID parameters")
+                            self.lock_is_locked = True
+
+                            # Read current PID values and update UI (block signals to prevent onChange)
+                            pid_response = self.send_lock_command("PID?")
+                            if pid_response and "PID?" not in pid_response:
+                                try:
+                                    parts = pid_response.strip().split()
+                                    if len(parts) >= 3:
+                                        # Block signals while updating spinboxes
+                                        if hasattr(self, 'doubleSpinBox_lock_P'):
+                                            self.doubleSpinBox_lock_P.blockSignals(True)
+                                            self.doubleSpinBox_lock_P.setValue(abs(float(parts[0])))
+                                            self.doubleSpinBox_lock_P.blockSignals(False)
+                                        if hasattr(self, 'doubleSpinBox_lock_P_2'):
+                                            self.doubleSpinBox_lock_P_2.blockSignals(True)
+                                            self.doubleSpinBox_lock_P_2.setValue(abs(float(parts[1])))
+                                            self.doubleSpinBox_lock_P_2.blockSignals(False)
+                                        if hasattr(self, 'doubleSpinBox_lock_P_3'):
+                                            self.doubleSpinBox_lock_P_3.blockSignals(True)
+                                            self.doubleSpinBox_lock_P_3.setValue(abs(float(parts[2])))
+                                            self.doubleSpinBox_lock_P_3.blockSignals(False)
+
+                                        # Check if values are negative (inverted)
+                                        if hasattr(self, 'checkBox_invertPID'):
+                                            is_inverted = float(parts[0]) < 0
+                                            self.checkBox_invertPID.blockSignals(True)
+                                            self.checkBox_invertPID.setChecked(is_inverted)
+                                            self.checkBox_invertPID.blockSignals(False)
+
+                                        print(f"✓ Read PID values: P={parts[0]}, I={parts[1]}, D={parts[2]}")
+                                except Exception as e:
+                                    print(f"⚠ Could not parse PID values: {e}")
+
+                        # Start automatic data monitoring (sweep or lock data)
                         self._start_lock_data_monitoring()
 
                         return True
@@ -2418,8 +2594,12 @@ Serial Communication Log
         try:
             # Check if data is available
             if self.lock_serial.box.in_waiting > 0:
+                bytes_waiting = self.lock_serial.box.in_waiting
                 # Read available data
-                new_data = self.lock_serial.box.read(self.lock_serial.box.in_waiting).decode('utf-8', errors='ignore')
+                new_data = self.lock_serial.box.read(bytes_waiting).decode('utf-8', errors='ignore')
+
+                # Uncomment for detailed debugging:
+                # print(f"ℹ Received {bytes_waiting} bytes, buffer size now: {len(self.lock_data_buffer) + len(new_data)}")
 
                 # Add to buffer
                 self.lock_data_buffer += new_data
@@ -2432,14 +2612,94 @@ Serial Communication Log
 
     def _process_lock_data_buffer(self):
         """
-        Process buffered serial data and extract complete sweep packets.
-        Parses CSV format: Point,DAC_Raw,ADC_Raw
+        Process buffered serial data.
+        - In locked mode: Parse "lock, x, y, error" format
+        - In sweep mode: Parse CSV format "Point,DAC_Raw,ADC_Raw"
+        Reports lost points or partial sweeps to console.
         """
         try:
+            # If device is in locked mode, parse lock data stream
+            if self.lock_is_locked:
+                lines = self.lock_data_buffer.split('\n')
+
+                # Keep the last incomplete line in the buffer
+                self.lock_data_buffer = lines[-1]
+
+                # Process complete lines
+                for line in lines[:-1]:
+                    line = line.strip()
+
+                    # Skip empty lines and comments
+                    if not line or line.startswith('#'):
+                        continue
+
+                    # Parse "lock, x, y, error" format
+                    if line.lower().startswith('lock'):
+                        try:
+                            parts = line.split(',')
+                            if len(parts) >= 4:
+                                x_val = int(parts[1].strip())
+                                y_val = int(parts[2].strip())
+                                error_val = int(parts[3].strip())
+
+                                # Store the last 200 error values
+                                self.lock_error_data.append(error_val)
+                                self.lock_error_x_data.append(x_val)
+                                self.lock_error_y_data.append(y_val)
+
+                                # Keep only last 200 values
+                                if len(self.lock_error_data) > 200:
+                                    self.lock_error_data = self.lock_error_data[-200:]
+                                    self.lock_error_x_data = self.lock_error_x_data[-200:]
+                                    self.lock_error_y_data = self.lock_error_y_data[-200:]
+
+                                # Update the text display with current values
+                                if self.lock_values_text:
+                                    text = f"DAC: {x_val} ({self.lock_initial_dac})\nADC: {y_val} ({self.lock_initial_adc})\nError: {error_val}"
+                                    self.lock_values_text.setText(text)
+                                    # Position at top right corner of visible range
+                                    view_range = self.lockPlot.getViewBox().viewRange()
+                                    x_max = view_range[0][1]
+                                    y_max = view_range[1][1]
+                                    self.lock_values_text.setPos(x_max, y_max)
+
+                                # Update the plot with error values
+                                self.update_lock_error_plot()
+
+                        except Exception as e:
+                            pass  # Skip malformed lock data lines
+
+                return  # Exit early for locked mode
+
+            # Otherwise, process sweep mode data
             # Detect sweep start marker from device
-            if "# Starting sweep" in self.lock_data_buffer and not self.lock_sweep_in_progress:
+            if "# Starting sweep" in self.lock_data_buffer:
+                print("ℹ Detected sweep start marker")
+                if self.lock_sweep_in_progress:
+                    # New sweep started while previous was still in progress -> partial sweep
+                    # DO NOT update plot with incomplete data
+                    if self.lock_received_points:
+                        min_p = min(self.lock_received_points)
+                        max_p = max(self.lock_received_points)
+                        expected = set(range(min_p, max_p + 1))
+                        missing = sorted(expected - self.lock_received_points)
+                        if missing:
+                            if len(missing) <= 20:
+                                print(f"⚠ Partial sweep discarded: received {len(self.lock_received_points)} points before new sweep. Missing {len(missing)} points: {missing}")
+                            else:
+                                print(f"⚠ Partial sweep discarded: received {len(self.lock_received_points)} points before new sweep. Missing {len(missing)} points (first 20: {missing[:20]})")
+                        else:
+                            print(f"ℹ Partial sweep discarded: received {len(self.lock_received_points)} contiguous points ({min_p}..{max_p}) before new sweep.")
+                    else:
+                        print("⚠ Partial sweep: no data points received before new sweep started.")
+
+                # Start new sweep - discard all data before "# Starting sweep" marker
+                sweep_marker_pos = self.lock_data_buffer.find("# Starting sweep")
+                self.lock_data_buffer = self.lock_data_buffer[sweep_marker_pos:]  # Keep only from marker onwards
+
                 self.lock_sweep_in_progress = True
                 self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': []}
+                self.lock_received_points.clear()
 
             # If sweep is in progress, parse data lines
             if self.lock_sweep_in_progress:
@@ -2452,32 +2712,61 @@ Serial Communication Log
                 for line in lines[:-1]:
                     line = line.strip()
 
-                    # Skip headers and comments
-                    if line.startswith('#') or 'Point,DAC_Raw,ADC_Raw' in line or not line:
+                    # Skip empty lines
+                    if not line:
                         continue
 
-                    # Parse data line: Point,DAC_Raw,ADC_Raw
-                    parts = line.split(',')
-                    if len(parts) == 3:
+                    # Skip headers, comments, and command echoes (check anywhere in line)
+                    if (line.startswith('#') or
+                        'Point,DAC_Raw,ADC_Raw' in line or
+                        'Lock CMD:' in line or
+                        'sweep ' in line.lower() or
+                        '->' in line):
+                        continue
+
+                    # Validate line matches CSV format: number,number,number (entire line)
+                    match = self.lock_csv_pattern.match(line)
+                    if match:
                         try:
-                            point = int(parts[0])
-                            dac_raw = int(parts[1])
-                            adc_raw = int(parts[2])
+                            point = int(match.group(1))
+                            dac_raw = int(match.group(2))
+                            adc_raw = int(match.group(3))
 
                             # Store data
                             self.lock_sweep_data['Point'].append(point)
                             self.lock_sweep_data['DAC_Raw'].append(dac_raw)
                             self.lock_sweep_data['ADC_Raw'].append(adc_raw)
+                            self.lock_received_points.add(point)
+
+                            # Log progress every 50 points
+                            if len(self.lock_sweep_data['Point']) % 50 == 0:
+                                print(f"ℹ Sweep progress: {len(self.lock_sweep_data['Point'])} points collected")
 
                         except ValueError:
                             pass  # Skip malformed lines
 
                 # Check for complete packet (200 points expected)
                 if len(self.lock_sweep_data['Point']) >= 200:
+                    print(f"ℹ Sweep data complete: {len(self.lock_sweep_data['Point'])} points, DAC range: {min(self.lock_sweep_data['DAC_Raw'])}-{max(self.lock_sweep_data['DAC_Raw'])}, ADC range: {min(self.lock_sweep_data['ADC_Raw'])}-{max(self.lock_sweep_data['ADC_Raw'])}")
+                    # Report lost points before completing
+                    if self.lock_received_points:
+                        min_p = min(self.lock_received_points)
+                        max_p = max(self.lock_received_points)
+                        expected = set(range(min_p, max_p + 1))
+                        missing = sorted(expected - self.lock_received_points)
+                        if missing:
+                            if len(missing) <= 20:
+                                print(f"⚠ Sweep complete with lost points: received {len(self.lock_received_points)}/200 points. Missing: {missing}")
+                            else:
+                                print(f"⚠ Sweep complete with lost points: received {len(self.lock_received_points)}/200 points. Missing {len(missing)} points (first 20: {missing[:20]})")
+                        else:
+                            print(f"✓ Sweep complete: all {len(self.lock_received_points)} points received contiguously ({min_p}..{max_p}).")
+
                     self.lock_sweep_in_progress = False
                     self.update_lock_plot()
                     # Clear buffer after processing
                     self.lock_data_buffer = ""
+                    self.lock_received_points.clear()
 
         except Exception as e:
             print(f"✗ Error processing lock data buffer: {e}")
@@ -2499,11 +2788,13 @@ Serial Communication Log
             self.lock_serial.box.write(cmd.encode('utf-8'))
             time.sleep(0.1)
 
-            # Read response only if not in sweep mode
+            # Read response only if not in sweep mode and not sending a sweep command
             response = ""
-            if not self.lock_sweep_in_progress and self.lock_serial.box.in_waiting > 0:
+            if not self.lock_sweep_in_progress and not command.strip().lower().startswith('sweep') and self.lock_serial.box.in_waiting > 0:
                 response = self.lock_serial.box.read(self.lock_serial.box.in_waiting).decode('utf-8', errors='ignore')
                 print(f"Lock CMD: {command} -> {response.strip()}")
+            elif command.strip().lower().startswith('sweep'):
+                print(f"Lock CMD: {command} -> [sweep started, data will be monitored]")
 
             return response
 
@@ -2525,6 +2816,12 @@ Serial Communication Log
             self.lock_data_buffer = ""
             self.lock_sweep_in_progress = False  # Set True when device responds
             self.lock_last_sweep_range = (start_val, stop_val)
+            self.lock_received_points.clear()  # Reset point tracking
+
+            # CRITICAL: Flush serial input buffer to discard any old/pending data
+            if self.lock_serial.box:
+                self.lock_serial.box.flushInput()
+                time.sleep(0.05)  # Brief pause to ensure flush completes
 
             # Send sweep command to device
             self.send_lock_command(f"sweep {start_val} {stop_val}")
@@ -2565,6 +2862,156 @@ Serial Communication Log
         except Exception as e:
             print(f"✗ Range change error: {e}")
 
+    def on_lock_plot_mouse_moved(self, pos):
+        """
+        Handle mouse movement over the lock plot to update crosshair position.
+        """
+        try:
+            if self.lockPlot and self.lock_vLine and self.lock_hLine:
+                # Check if mouse is within the plot area
+                if self.lockPlot.sceneBoundingRect().contains(pos):
+                    # Map scene position to plot coordinates
+                    mouse_point = self.lockPlot.vb.mapSceneToView(pos)
+                    # Update crosshair position
+                    self.lock_vLine.setPos(mouse_point.x())
+                    self.lock_hLine.setPos(mouse_point.y())
+        except Exception as e:
+            # Silently ignore errors (e.g., during initialization or cleanup)
+            pass
+
+    def on_lock_plot_clicked(self, event):
+        """
+        Handle mouse click on lock plot.
+        Middle button click sends lock command to specified DAC/ADC coordinates.
+        """
+        try:
+            # Check for middle mouse button click
+            if event.button() == QtCore.Qt.MouseButton.MiddleButton:
+                if self.lockPlot and self.lock_connected:
+                    # Check if click is within the plot area
+                    if self.lockPlot.sceneBoundingRect().contains(event.scenePos()):
+                        # Map scene position to plot coordinates
+                        mouse_point = self.lockPlot.vb.mapSceneToView(event.scenePos())
+                        dac_value = int(mouse_point.x())
+                        adc_value = int(mouse_point.y())
+
+                        # Clamp to valid ranges
+                        dac_value = max(0, min(65535, dac_value))
+                        adc_value = max(0, min(4095, adc_value))
+
+                        # Check if already in locked mode - if so, unlock and return to sweep
+                        if self.lock_is_locked:
+                            print(f"ℹ Middle click detected - unlocking and returning to sweep mode")
+
+                            # Send unlock command
+                            self.send_lock_command("lock OFF")
+                            print(f"✓ Unlock command sent: lock OFF")
+
+                            # Switch to sweep mode
+                            self.lock_is_locked = False
+                            self.lock_sweep_in_progress = False
+
+                            # Clear error data and error plot
+                            self.lock_error_data = []
+                            self.lock_error_x_data = []
+                            self.lock_error_y_data = []
+                            self.lock_error_counter = 0
+
+                            if self.lock_error_plot_curve:
+                                self.lock_error_plot_curve.setData([], [])
+
+                            # Clear text display
+                            if self.lock_values_text:
+                                self.lock_values_text.setText("")
+
+                            # Get current PID values and send them
+                            p_val = 0
+                            i_val = 0
+                            d_val = 0
+                            if hasattr(self, 'doubleSpinBox_lock_P'):
+                                p_val = int(self.doubleSpinBox_lock_P.value())
+                            if hasattr(self, 'doubleSpinBox_lock_P_2'):
+                                i_val = int(self.doubleSpinBox_lock_P_2.value())
+                            if hasattr(self, 'doubleSpinBox_lock_P_3'):
+                                d_val = int(self.doubleSpinBox_lock_P_3.value())
+
+                            # Apply inversion if checkbox is checked
+                            if hasattr(self, 'checkBox_invertPID') and self.checkBox_invertPID.isChecked():
+                                p_val = -p_val
+                                i_val = -i_val
+                                d_val = -d_val
+
+                            # Send PID values
+                            self.send_lock_command(f"PID {p_val} {i_val} {d_val}")
+
+                            # Calculate sweep range centered on current DAC value
+                            # Get the last received DAC value (current x position)
+                            current_dac = self.lock_error_x_data[-1] if self.lock_error_x_data else self.lock_initial_dac
+
+                            print(f"DEBUG: Restoring sweep - stored start={self.lock_sweep_start}, stop={self.lock_sweep_stop}")
+
+                            # Calculate sweep range from stored values
+                            sweep_range = self.lock_sweep_stop - self.lock_sweep_start
+                            print(f"DEBUG: Calculated sweep range={sweep_range}, current_dac={current_dac}")
+
+                            # Calculate start and stop with same range, centered on current DAC
+                            half_range = sweep_range // 2
+                            sweep_start = current_dac - half_range
+                            sweep_stop = current_dac + half_range
+
+                            # Clamp to valid DAC range (0-65535)
+                            if sweep_start < 0:
+                                sweep_start = 0
+                                sweep_stop = min(65535, sweep_range)
+                            elif sweep_stop > 65535:
+                                sweep_stop = 65535
+                                sweep_start = max(0, 65535 - sweep_range)
+
+                            # Ensure valid range
+                            sweep_start = int(max(0, min(65535, sweep_start)))
+                            sweep_stop = int(max(0, min(65535, sweep_stop)))
+
+                            # Start sweep centered on current position
+                            self.send_lock_command(f"sweep {sweep_start} {sweep_stop}")
+                            print(f"ℹ Returned to sweep mode: {sweep_start}-{sweep_stop} (range={sweep_stop-sweep_start}, centered on DAC={current_dac})")
+
+                        else:
+                            # Not locked - lock to the clicked position
+                            print(f"ℹ Middle click detected at DAC={dac_value}, ADC={adc_value}")
+
+                            # Store initial lock values
+                            self.lock_initial_dac = dac_value
+                            self.lock_initial_adc = adc_value
+
+                            # Store current sweep range for restoration (BEFORE switching to lock mode)
+                            view_range = self.lockPlot.getViewBox().viewRange()
+                            x_min, x_max = view_range[0]
+                            print(f"DEBUG: Raw view range before lock: x=({x_min}, {x_max})")
+                            self.lock_sweep_start = int(max(0, min(65535, x_min)))
+                            self.lock_sweep_stop = int(max(0, min(65535, x_max)))
+                            print(f"✓ Stored sweep range: {self.lock_sweep_start}-{self.lock_sweep_stop} (range={self.lock_sweep_stop - self.lock_sweep_start})")
+
+                            # Switch to lock mode
+                            self.lock_is_locked = True
+                            self.lock_sweep_in_progress = False
+
+                            # Clear error data for new lock
+                            self.lock_error_data = []
+                            self.lock_error_x_data = []
+                            self.lock_error_y_data = []
+                            self.lock_error_counter = 0
+
+                            # Clear sweep plot curve
+                            if self.lock_plot_curve:
+                                self.lock_plot_curve.setData([], [])
+
+                            # Send lock command
+                            self.send_lock_command(f"lock {dac_value} {adc_value}")
+                            print(f"✓ Lock command sent: lock {dac_value} {adc_value}")
+
+        except Exception as e:
+            print(f"✗ Error handling lock plot click: {e}")
+
     def _execute_pending_sweep(self):
         """Execute sweep command after debounce period expires"""
         try:
@@ -2582,7 +3029,9 @@ Serial Communication Log
         Skips first data point as it's often unreliable.
         """
         try:
+            print(f"ℹ update_lock_plot called: {len(self.lock_sweep_data.get('DAC_Raw', []))} DAC points")
             if self.lock_plot_curve and len(self.lock_sweep_data['DAC_Raw']) > 1:
+                print(f"ℹ Updating plot with {len(self.lock_sweep_data['DAC_Raw'])-1} points (skipping first)")
                 lock_vb = self.lockPlot.getViewBox()
                 lock_vb.sigRangeChanged.disconnect(self.on_lock_plot_range_changed)
 
@@ -2605,6 +3054,32 @@ Serial Communication Log
                 lock_vb.sigRangeChanged.connect(self.on_lock_plot_range_changed)
             except:
                 pass
+
+    def update_lock_error_plot(self):
+        """
+        Update lock plot with error data when in locked mode.
+        Displays the last 200 error values.
+        """
+        try:
+            if self.lock_error_plot_curve and len(self.lock_error_data) > 0:
+                # Create x-axis as sample indices (0 to N-1)
+                x_data = list(range(len(self.lock_error_data)))
+
+                # Update the plot with error values
+                self.lock_error_plot_curve.setData(x_data, self.lock_error_data)
+
+                # Auto-scale y-axis to fit error data
+                if len(self.lock_error_data) > 1:
+                    min_error = min(self.lock_error_data)
+                    max_error = max(self.lock_error_data)
+                    margin = (max_error - min_error) * 0.1 if max_error != min_error else 100
+                    self.lockPlot.setYRange(min_error - margin, max_error + margin, padding=0)
+
+                # Set x-axis to show last 200 points
+                self.lockPlot.setXRange(0, 200, padding=0)
+
+        except Exception as e:
+            print(f"✗ Error updating lock error plot: {e}")
 
     def toggle_plot_splitter_orientation(self):
         """Toggle splitter orientation between vertical (stacked) and horizontal (side-by-side)"""

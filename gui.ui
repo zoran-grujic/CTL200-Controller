@@ -6,7 +6,7 @@
    <rect>
     <x>0</x>
     <y>0</y>
-    <width>1209</width>
+    <width>1340</width>
     <height>618</height>
    </rect>
   </property>
@@ -449,20 +449,41 @@
                 </widget>
                </item>
                <item row="0" column="1">
-                <widget class="QDoubleSpinBox" name="doubleSpinBox_lock_P"/>
+                <widget class="QDoubleSpinBox" name="doubleSpinBox_lock_P">
+                 <property name="decimals">
+                  <number>0</number>
+                 </property>
+                 <property name="maximum">
+                  <double>1000.000000000000000</double>
+                 </property>
+                </widget>
                </item>
                <item row="3" column="1">
-                <widget class="QCheckBox" name="checkBox">
+                <widget class="QCheckBox" name="checkBox_invertPID">
                  <property name="text">
                   <string>Invert PID</string>
                  </property>
                 </widget>
                </item>
                <item row="1" column="1">
-                <widget class="QDoubleSpinBox" name="doubleSpinBox_lock_P_2"/>
+                <widget class="QDoubleSpinBox" name="doubleSpinBox_lock_P_2">
+                 <property name="decimals">
+                  <number>0</number>
+                 </property>
+                 <property name="maximum">
+                  <double>1000.000000000000000</double>
+                 </property>
+                </widget>
                </item>
                <item row="2" column="1">
-                <widget class="QDoubleSpinBox" name="doubleSpinBox_lock_P_3"/>
+                <widget class="QDoubleSpinBox" name="doubleSpinBox_lock_P_3">
+                 <property name="decimals">
+                  <number>0</number>
+                 </property>
+                 <property name="maximum">
+                  <double>1000.000000000000000</double>
+                 </property>
+                </widget>
                </item>
               </layout>
              </item>
@@ -618,7 +639,7 @@
     <rect>
      <x>0</x>
      <y>0</y>
-     <width>1209</width>
+     <width>1340</width>
      <height>26</height>
     </rect>
    </property>
