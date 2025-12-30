@@ -102,6 +102,7 @@ class MyUi(Ui_MainWindow):
         self.lock_connection_attempts = 0
         self.lock_max_attempts = 10  # Try 10 times before giving up
         self.lock_retry_timer = None
+        self.lock_first_sweep_after_connect = False  # Flag for autoscaling after first sweep
 
         # Create the plot widget instance after proper setup
         self.plotWindow = None
@@ -114,6 +115,7 @@ class MyUi(Ui_MainWindow):
         self.lock_plot_curve = None
         self.lock_vLine = None  # Vertical crosshair line
         self.lock_hLine = None  # Horizontal crosshair line
+        self.lock_zero_line = None  # Green horizontal line at y=0 (visible only in lock mode)
         self.lock_values_text = None  # Text item for displaying lock values
 
         # Laser lock data storage for sweep mode
@@ -357,6 +359,11 @@ class MyUi(Ui_MainWindow):
         self.lock_hLine = pg.InfiniteLine(angle=0, movable=False, pen=pg.mkPen(color='y', width=1, style=QtCore.Qt.PenStyle.DashLine))
         self.lockPlot.addItem(self.lock_vLine, ignoreBounds=True)
         self.lockPlot.addItem(self.lock_hLine, ignoreBounds=True)
+
+        # Add green horizontal line at y=0 for lock mode (initially hidden)
+        self.lock_zero_line = pg.InfiniteLine(angle=0, movable=False, pos=0, pen=pg.mkPen(color='g', width=2))
+        self.lockPlot.addItem(self.lock_zero_line, ignoreBounds=True)
+        self.lock_zero_line.setVisible(False)  # Hidden by default (shown only in lock mode)
 
         # Connect mouse move event for crosshair
         self.lockPlot.scene().sigMouseMoved.connect(self.on_lock_plot_mouse_moved)
@@ -665,6 +672,12 @@ class MyUi(Ui_MainWindow):
             self.pushButton_connectDisconnect.setText("Disconnect")  # Initial state - will try to connect
             self.pushButton_connectDisconnect.setEnabled(False)  # Disabled until initial connection attempt completes
 
+        # Connect the laser lock connect/disconnect button
+        if hasattr(self, 'pushButton_connectDisconnect_LaserLock'):
+            self.pushButton_connectDisconnect_LaserLock.clicked.connect(self.on_laser_lock_connect_disconnect_clicked)
+            self.pushButton_connectDisconnect_LaserLock.setText("Connect Laser Lock")
+            self.pushButton_connectDisconnect_LaserLock.setEnabled(True)
+
         # Connect laser lock PID controls
         if hasattr(self, 'doubleSpinBox_lock_P'):
             self.doubleSpinBox_lock_P.valueChanged.connect(self.on_lock_pid_changed)
@@ -692,6 +705,12 @@ class MyUi(Ui_MainWindow):
 
         # Update status label
         self.label_status.setText("Status: Connecting...")
+
+        # Initialize laser lock labels
+        if hasattr(self, 'label_status_LaserLock'):
+            self.label_status_LaserLock.setText("Status: Not connected")
+        if hasattr(self, 'label_SerialPort_LaseLock'):
+            self.label_SerialPort_LaseLock.setText("")
 
         # Update window title
         MainWindow.setWindowTitle("CTL200-0 Laser Controller")
@@ -1478,6 +1497,93 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
                 # Switch to Serial Connection tab
                 self.tabWidget.setCurrentIndex(1)
 
+    def on_laser_lock_connect_disconnect_clicked(self):
+        """Handle laser lock connect/disconnect button click"""
+        if not hasattr(self, 'pushButton_connectDisconnect_LaserLock'):
+            return
+
+        button_text = self.pushButton_connectDisconnect_LaserLock.text()
+
+        if "Connect" in button_text:
+            # User wants to connect
+            print("ℹ User clicked Connect Laser Lock button")
+            self.pushButton_connectDisconnect_LaserLock.setEnabled(False)
+
+            # Update status
+            if hasattr(self, 'label_status_LaserLock'):
+                self.label_status_LaserLock.setText("Status: Connecting...")
+
+            # Attempt connection
+            self.connect_laser_lock_device()
+
+            # Re-enable button
+            self.pushButton_connectDisconnect_LaserLock.setEnabled(True)
+
+        elif "Disconnect" in button_text:
+            # User wants to disconnect
+            print("ℹ User clicked Disconnect Laser Lock button")
+
+            # Ask for confirmation
+            reply = QtWidgets.QMessageBox.question(
+                self.main_window,
+                'Disconnect Laser Lock',
+                'Are you sure you want to disconnect from the Laser Lock device?',
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No
+            )
+
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                self.disconnect_laser_lock_device()
+
+    def disconnect_laser_lock_device(self):
+        """Disconnect from laser lock device"""
+        try:
+            # Stop monitoring
+            self._stop_lock_data_monitoring()
+
+            # Stop retry timer if running
+            if self.lock_retry_timer:
+                self.lock_retry_timer.stop()
+                self.lock_retry_timer = None
+                self.lock_connection_attempts = 0
+
+            # Disconnect the device
+            if self.lock_serial.box:
+                try:
+                    self.lock_serial.box.close()
+                except:
+                    pass
+                self.lock_serial.box = None
+
+            self.lock_serial.connected = False
+            self.lock_connected = False
+            self.lock_serial.port = ""
+
+            # Reset autoscale flag
+            self.lock_first_sweep_after_connect = False
+
+            print("✓ Disconnected from laser lock device")
+
+            # Update UI
+            if hasattr(self, 'label_status_LaserLock'):
+                self.label_status_LaserLock.setText("Status: Disconnected")
+            if hasattr(self, 'label_SerialPort_LaseLock'):
+                self.label_SerialPort_LaseLock.setText("")
+            if hasattr(self, 'pushButton_connectDisconnect_LaserLock'):
+                self.pushButton_connectDisconnect_LaserLock.setText("Connect Laser Lock")
+
+            # Disable lock controls
+            if hasattr(self, 'groupBox_4'):
+                self.groupBox_4.setEnabled(False)
+
+            # Clear text display
+            if hasattr(self, 'textEdit_SerialPort_Lock'):
+                self.textEdit_SerialPort_Lock.clear()
+                self.textEdit_SerialPort_Lock.append('<span style="color: #FFA500;">Laser Lock disconnected</span>')
+
+        except Exception as e:
+            print(f"✗ Error disconnecting laser lock: {e}")
+
     def _handle_command_completed(self, command, success, response):
         """Handle command completion signal from worker thread"""
         if success:
@@ -1618,6 +1724,72 @@ Serial Communication Log
 
         except Exception as e:
             print(f"✗ Error toggling logging: {e}")
+
+    def display_lock_communication(self, command, response=None):
+        """
+        Display laser lock command and response in textEdit_SerialPort_Lock.
+        Excludes sweep data and lock error data.
+
+        Args:
+            command: The command sent to the laser lock device
+            response: The response received (if any)
+        """
+        try:
+            if not hasattr(self, 'textEdit_SerialPort_Lock'):
+                print(f"⚠ textEdit_SerialPort_Lock widget not found!")
+                return
+
+            # Skip sweep commands and their responses (sweep data is displayed in plot)
+            if command.strip().lower().startswith('sweep'):
+                print(f"ℹ Skipping sweep command display: {command.strip()}")
+                return
+
+            # Skip lock error data stream (continuous "lock,x,y,error" format coming from device)
+            # But allow lock queries (lock?) and lock control commands (lock ON/OFF, lock <dac> <adc>)
+            # Only skip if command is exactly "lock" with no parameters and response has commas
+            cmd_lower = command.strip().lower()
+            if cmd_lower == 'lock' and response and ',' in str(response):
+                # This is the continuous lock error data stream
+                print(f"ℹ Skipping lock error data stream")
+                return
+
+            # Build HTML formatted message
+            timestamp = time.strftime("%H:%M:%S")
+
+            # Command (sent - blue color)
+            html_parts = []
+            html_parts.append(f'<span style="color: #87CEEB;">[{timestamp}] TX: {command.strip()}</span>')
+
+            # Response (received - green color)
+            if response:
+                response_text = response.strip()
+                if response_text:
+                    # Skip if response looks like sweep data (number,number,number)
+                    if not (response_text.count(',') >= 2 and all(part.strip().replace('-','').isdigit() for part in response_text.split(','))):
+                        html_parts.append(f'<span style="color: #90EE90;"> → {response_text}</span>')
+
+            # Display in text widget
+            if html_parts:
+                self.textEdit_SerialPort_Lock.append(''.join(html_parts))
+                print(f"✓ Displayed lock command in widget: {command.strip()}")
+
+                # Auto-scroll to bottom
+                scrollbar = self.textEdit_SerialPort_Lock.verticalScrollBar()
+                scrollbar.setValue(scrollbar.maximum())
+
+                # Limit text size to prevent memory issues
+                plain_text = self.textEdit_SerialPort_Lock.toPlainText()
+                if len(plain_text) > 10000:
+                    cursor = self.textEdit_SerialPort_Lock.textCursor()
+                    cursor.movePosition(QtGui.QTextCursor.MoveOperation.Start)
+                    cursor.movePosition(QtGui.QTextCursor.MoveOperation.End)
+                    cursor.movePosition(QtGui.QTextCursor.MoveOperation.PreviousCharacter,
+                                      QtGui.QTextCursor.MoveMode.KeepAnchor,
+                                      len(plain_text) - 8000)
+                    cursor.removeSelectedText()
+
+        except Exception as e:
+            print(f"✗ Error displaying lock communication: {e}")
 
     def on_pause_logging_toggled(self, state):
         """Pause or resume logging display"""
@@ -2426,96 +2598,74 @@ Serial Communication Log
 
                         self._update_lock_connection_status(f"✓ Connected on {port}")
 
+                        # Update laser lock UI labels
+                        if hasattr(self, 'label_SerialPort_LaseLock'):
+                            self.label_SerialPort_LaseLock.setText(f"{port}")
+                        if hasattr(self, 'label_status_LaserLock'):
+                            self.label_status_LaserLock.setText("Status: Connected")
+                        if hasattr(self, 'pushButton_connectDisconnect_LaserLock'):
+                            self.pushButton_connectDisconnect_LaserLock.setText("Disconnect Laser Lock")
+
+                        # Initialize laser lock communication display
+                        if hasattr(self, 'textEdit_SerialPort_Lock'):
+                            print("✓ textEdit_SerialPort_Lock widget found - initializing...")
+                            self.textEdit_SerialPort_Lock.clear()
+                            header_html = f"""<div style="color: #AAAAAA; margin: 10px 0;">
+<b>ESP32 Laser Lock Device</b><br>
+Port: {port}<br>
+Device: Laser lock by BGMAGLAB<br><br>
+<span style="color: #00FF00;">Device connected - monitoring commands</span><br>
+{'='*60}<br><br>
+</div>"""
+                            self.textEdit_SerialPort_Lock.insertHtml(header_html)
+                            print("✓ Header displayed in textEdit_SerialPort_Lock")
+                            # Test that display is working
+                            self.textEdit_SerialPort_Lock.append('<span style="color: #87CEEB;">[TEST] Widget is ready to display commands</span>')
+                        else:
+                            print("✗ textEdit_SerialPort_Lock widget NOT found!")
+
                         # Enable lock controls (on Laser Control tab)
                         if hasattr(self, 'groupBox_4'):
                             self.groupBox_4.setEnabled(True)
 
-                        # Query lock state to determine mode
-                        # Send 'lock?' command and check the response format:
-                        # - If locked: responds with "0" or "1" (or similar status)
-                        # - If unlocked/sweep: no meaningful response or empty
-                        lock_state_response = self.send_lock_command("lock?")
-                        print(f"ℹ Lock state query response: '{lock_state_response.strip() if lock_state_response else 'None'}'")
+                        # Always send "lock OFF" command first to ensure device is in sweep mode
+                        # This handles the case where the device was previously in lock state
+                        print("ℹ Sending 'lock OFF' command to ensure sweep mode...")
+                        lock_off_response = self.send_lock_command("lock OFF")
+                        print(f"✓ Lock OFF command sent, response: '{lock_off_response.strip() if lock_off_response else 'None'}'")
 
-                        # Check if response indicates locked state (0 = unlocked, 1 = locked, or similar)
-                        is_locked = False
-                        if lock_state_response and lock_state_response.strip():
-                            try:
-                                # Try to parse as integer (0=unlocked, 1=locked)
-                                lock_value = int(lock_state_response.strip())
-                                is_locked = (lock_value == 1)
-                            except ValueError:
-                                # If not a simple integer, check for specific text
-                                response_lower = lock_state_response.strip().lower()
-                                is_locked = ("locked" in response_lower and "unlocked" not in response_lower)
+                        # Device is now in unlocked/sweep mode
+                        self.lock_is_locked = False
 
-                        if not is_locked:
-                            # Device is in unlocked/sweep mode
-                            print("ℹ Device is unlocked - entering sweep mode")
-                            self.lock_is_locked = False
+                        # Set flag to autoscale after first sweep
+                        self.lock_first_sweep_after_connect = True
 
-                            # Send current PID parameters from UI
-                            p_val = 0
-                            i_val = 0
-                            d_val = 0
-                            if hasattr(self, 'doubleSpinBox_lock_P'):
-                                p_val = int(self.doubleSpinBox_lock_P.value())
-                            if hasattr(self, 'doubleSpinBox_lock_P_2'):
-                                i_val = int(self.doubleSpinBox_lock_P_2.value())
-                            if hasattr(self, 'doubleSpinBox_lock_P_3'):
-                                d_val = int(self.doubleSpinBox_lock_P_3.value())
+                        # Send current PID parameters from UI
+                        p_val = 0
+                        i_val = 0
+                        d_val = 0
+                        if hasattr(self, 'doubleSpinBox_lock_P'):
+                            p_val = int(self.doubleSpinBox_lock_P.value())
+                        if hasattr(self, 'doubleSpinBox_lock_P_2'):
+                            i_val = int(self.doubleSpinBox_lock_P_2.value())
+                        if hasattr(self, 'doubleSpinBox_lock_P_3'):
+                            d_val = int(self.doubleSpinBox_lock_P_3.value())
 
-                            # Apply inversion if checkbox is checked
-                            if hasattr(self, 'checkBox_invertPID') and self.checkBox_invertPID.isChecked():
-                                p_val = -p_val
-                                i_val = -i_val
-                                d_val = -d_val
+                        # Apply inversion if checkbox is checked
+                        if hasattr(self, 'checkBox_invertPID') and self.checkBox_invertPID.isChecked():
+                            p_val = -p_val
+                            i_val = -i_val
+                            d_val = -d_val
 
-                            # Send PID command
-                            self.send_lock_command(f"PID {p_val} {i_val} {d_val}")
-                            print(f"✓ Sent PID values: P={p_val}, I={i_val}, D={d_val}")
+                        # Send PID command
+                        self.send_lock_command(f"PID {p_val} {i_val} {d_val}")
+                        print(f"✓ Sent PID values: P={p_val}, I={i_val}, D={d_val}")
 
-                            # Start sweep with full range
-                            self.send_lock_command("sweep 0 65535")
-                            print("ℹ Started full range sweep (0-65535)")
+                        # Start sweep with full range
+                        self.send_lock_command("sweep 0 65535")
+                        print("ℹ Started full range sweep (0-65535)")
 
-                        else:
-                            # Device is locked - read current PID values
-                            print("ℹ Device is locked - reading PID parameters")
-                            self.lock_is_locked = True
-
-                            # Read current PID values and update UI (block signals to prevent onChange)
-                            pid_response = self.send_lock_command("PID?")
-                            if pid_response and "PID?" not in pid_response:
-                                try:
-                                    parts = pid_response.strip().split()
-                                    if len(parts) >= 3:
-                                        # Block signals while updating spinboxes
-                                        if hasattr(self, 'doubleSpinBox_lock_P'):
-                                            self.doubleSpinBox_lock_P.blockSignals(True)
-                                            self.doubleSpinBox_lock_P.setValue(abs(float(parts[0])))
-                                            self.doubleSpinBox_lock_P.blockSignals(False)
-                                        if hasattr(self, 'doubleSpinBox_lock_P_2'):
-                                            self.doubleSpinBox_lock_P_2.blockSignals(True)
-                                            self.doubleSpinBox_lock_P_2.setValue(abs(float(parts[1])))
-                                            self.doubleSpinBox_lock_P_2.blockSignals(False)
-                                        if hasattr(self, 'doubleSpinBox_lock_P_3'):
-                                            self.doubleSpinBox_lock_P_3.blockSignals(True)
-                                            self.doubleSpinBox_lock_P_3.setValue(abs(float(parts[2])))
-                                            self.doubleSpinBox_lock_P_3.blockSignals(False)
-
-                                        # Check if values are negative (inverted)
-                                        if hasattr(self, 'checkBox_invertPID'):
-                                            is_inverted = float(parts[0]) < 0
-                                            self.checkBox_invertPID.blockSignals(True)
-                                            self.checkBox_invertPID.setChecked(is_inverted)
-                                            self.checkBox_invertPID.blockSignals(False)
-
-                                        print(f"✓ Read PID values: P={parts[0]}, I={parts[1]}, D={parts[2]}")
-                                except Exception as e:
-                                    print(f"⚠ Could not parse PID values: {e}")
-
-                        # Start automatic data monitoring (sweep or lock data)
+                        # Start monitoring
                         self._start_lock_data_monitoring()
 
                         return True
@@ -2560,10 +2710,13 @@ Serial Communication Log
     def _update_lock_connection_status(self, message):
         """Update the ESP32 laser lock connection status display"""
         try:
-            # For now, just use console output
-            # In the future, this could update a status label in the UI if one is added
+            # Console output
             status_line = f"[ESP32 Laser Lock] {message}"
             print(status_line)
+
+            # Update UI label if available
+            if hasattr(self, 'label_status_LaserLock'):
+                self.label_status_LaserLock.setText(f"Status: {message}")
         except Exception as e:
             print(f"⚠ Error updating lock status: {e}")
 
@@ -2655,7 +2808,9 @@ Serial Communication Log
 
                                 # Update the text display with current values
                                 if self.lock_values_text:
-                                    text = f"DAC: {x_val} ({self.lock_initial_dac})\nADC: {y_val} ({self.lock_initial_adc})\nError: {error_val}"
+                                    # Calculate standard deviation of error
+                                    error_std = np.std(self.lock_error_data) if len(self.lock_error_data) > 1 else 0
+                                    text = f"DAC: {x_val} ({self.lock_initial_dac})\nADC: {y_val} ({self.lock_initial_adc})\nError: {error_val}\nStd: {error_std:.2f}"
                                     self.lock_values_text.setText(text)
                                     # Position at top right corner of visible range
                                     view_range = self.lockPlot.getViewBox().viewRange()
@@ -2793,8 +2948,14 @@ Serial Communication Log
             if not self.lock_sweep_in_progress and not command.strip().lower().startswith('sweep') and self.lock_serial.box.in_waiting > 0:
                 response = self.lock_serial.box.read(self.lock_serial.box.in_waiting).decode('utf-8', errors='ignore')
                 print(f"Lock CMD: {command} -> {response.strip()}")
+                # Display in textEdit_SerialPort_Lock
+                self.display_lock_communication(command, response)
             elif command.strip().lower().startswith('sweep'):
                 print(f"Lock CMD: {command} -> [sweep started, data will be monitored]")
+                # Don't display sweep commands in text widget
+            else:
+                # Command sent but no response yet (might be for lock mode)
+                self.display_lock_communication(command, None)
 
             return response
 
@@ -2834,9 +2995,15 @@ Serial Communication Log
         """
         Handle x-axis range change (zoom/pan) on lock plot.
         Debounces rapid changes - waits 500ms after user stops interaction.
+        Only sends sweep commands when in sweep mode (not in lock mode).
         """
         try:
             if not self.lock_connected:
+                return
+
+            # Don't send sweep commands while in lock mode
+            if self.lock_is_locked:
+                #print("ℹ Plot range changed but device is in lock mode - ignoring")
                 return
 
             # Get visible x-axis range and clamp to valid DAC range (0-65535)
@@ -2910,6 +3077,13 @@ Serial Communication Log
                             # Switch to sweep mode
                             self.lock_is_locked = False
                             self.lock_sweep_in_progress = False
+
+                            # Set flag to autoscale after first sweep
+                            self.lock_first_sweep_after_connect = True
+
+                            # Hide green horizontal line (only visible in lock mode)
+                            if self.lock_zero_line:
+                                self.lock_zero_line.setVisible(False)
 
                             # Clear error data and error plot
                             self.lock_error_data = []
@@ -2995,6 +3169,10 @@ Serial Communication Log
                             self.lock_is_locked = True
                             self.lock_sweep_in_progress = False
 
+                            # Show green horizontal line at y=0 for lock mode
+                            if self.lock_zero_line:
+                                self.lock_zero_line.setVisible(True)
+
                             # Clear error data for new lock
                             self.lock_error_data = []
                             self.lock_error_x_data = []
@@ -3013,8 +3191,17 @@ Serial Communication Log
             print(f"✗ Error handling lock plot click: {e}")
 
     def _execute_pending_sweep(self):
-        """Execute sweep command after debounce period expires"""
+        """
+        Execute sweep command after debounce period expires.
+        Only executes if device is in sweep mode (not locked).
+        """
         try:
+            # Don't execute sweep if device is in lock mode
+            if self.lock_is_locked:
+                print("ℹ Pending sweep cancelled - device is in lock mode")
+                self.lock_pending_range = None
+                return
+
             if self.lock_pending_range and self.lock_connected:
                 start_val, stop_val = self.lock_pending_range
                 self.start_sweep(start_val, stop_val)
@@ -3027,6 +3214,7 @@ Serial Communication Log
         Update lock plot with new sweep data.
         Temporarily blocks range change signals to prevent triggering new sweeps during update.
         Skips first data point as it's often unreliable.
+        Autoscales after first sweep following connection.
         """
         try:
             print(f"ℹ update_lock_plot called: {len(self.lock_sweep_data.get('DAC_Raw', []))} DAC points")
@@ -3042,6 +3230,12 @@ Serial Communication Log
                     self.lock_sweep_data['DAC_Raw'][1:],
                     self.lock_sweep_data['ADC_Raw'][1:]
                 )
+
+                # Autoscale after first sweep following connection
+                if self.lock_first_sweep_after_connect:
+                    print("ℹ Autoscaling plot after first sweep")
+                    self.lockPlot.autoRange()
+                    self.lock_first_sweep_after_connect = False  # Only autoscale once
 
                 lock_vb.sigRangeChanged.connect(self.on_lock_plot_range_changed)
 

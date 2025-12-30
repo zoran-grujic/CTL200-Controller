@@ -7,7 +7,7 @@
     <x>0</x>
     <y>0</y>
     <width>1340</width>
-    <height>618</height>
+    <height>623</height>
    </rect>
   </property>
   <property name="windowTitle">
@@ -33,6 +33,13 @@
              <string>Basic laser controll</string>
             </property>
             <layout class="QGridLayout" name="gridLayout_6">
+             <item row="2" column="0">
+              <widget class="QLabel" name="label_4">
+               <property name="text">
+                <string>Set laser current</string>
+               </property>
+              </widget>
+             </item>
              <item row="1" column="0">
               <widget class="QCheckBox" name="checkBox_TECEnable">
                <property name="toolTip">
@@ -40,13 +47,6 @@
                </property>
                <property name="text">
                 <string>Enable TEC</string>
-               </property>
-              </widget>
-             </item>
-             <item row="2" column="0">
-              <widget class="QLabel" name="label_4">
-               <property name="text">
-                <string>Set laser current</string>
                </property>
               </widget>
              </item>
@@ -96,13 +96,6 @@
                </item>
               </layout>
              </item>
-             <item row="0" column="1" alignment="Qt::AlignRight">
-              <widget class="QLabel" name="label_2">
-               <property name="text">
-                <string>Laser current:</string>
-               </property>
-              </widget>
-             </item>
              <item row="0" column="2">
               <widget class="QLabel" name="label_LaserCurrent_mA">
                <property name="text">
@@ -110,10 +103,26 @@
                </property>
               </widget>
              </item>
-             <item row="3" column="0">
-              <widget class="QLabel" name="label_5">
+             <item row="0" column="1" alignment="Qt::AlignRight">
+              <widget class="QLabel" name="label_2">
                <property name="text">
-                <string>Set temperature</string>
+                <string>Laser current:</string>
+               </property>
+              </widget>
+             </item>
+             <item row="3" column="1">
+              <widget class="QDoubleSpinBox" name="doubleSpinBox_SetTemperature">
+               <property name="suffix">
+                <string> Ohm</string>
+               </property>
+               <property name="decimals">
+                <number>1</number>
+               </property>
+               <property name="maximum">
+                <double>15000.000000000000000</double>
+               </property>
+               <property name="value">
+                <double>10000.000000000000000</double>
                </property>
               </widget>
              </item>
@@ -133,16 +142,10 @@
                </property>
               </widget>
              </item>
-             <item row="3" column="1">
-              <widget class="QDoubleSpinBox" name="doubleSpinBox_SetTemperature">
-               <property name="suffix">
-                <string> Ohm</string>
-               </property>
-               <property name="maximum">
-                <double>15000.000000000000000</double>
-               </property>
-               <property name="value">
-                <double>10000.000000000000000</double>
+             <item row="3" column="0">
+              <widget class="QLabel" name="label_5">
+               <property name="text">
+                <string>Set temperature</string>
                </property>
               </widget>
              </item>
@@ -187,6 +190,13 @@
                </property>
               </widget>
              </item>
+             <item row="1" column="1" alignment="Qt::AlignRight">
+              <widget class="QLabel" name="label_7">
+               <property name="text">
+                <string>Temp. mod. gain</string>
+               </property>
+              </widget>
+             </item>
              <item row="0" column="0">
               <widget class="QCheckBox" name="checkBox_ain1Enable">
                <property name="toolTip">
@@ -194,13 +204,6 @@
                </property>
                <property name="text">
                 <string>Enable ain1 curr. mod.</string>
-               </property>
-              </widget>
-             </item>
-             <item row="1" column="1" alignment="Qt::AlignRight">
-              <widget class="QLabel" name="label_7">
-               <property name="text">
-                <string>Temp. mod. gain</string>
                </property>
               </widget>
              </item>
@@ -230,6 +233,32 @@
                </property>
                <property name="value">
                 <double>20.000000000000000</double>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="0" alignment="Qt::AlignRight">
+              <widget class="QLabel" name="label_18">
+               <property name="text">
+                <string>Set max. laser curr.</string>
+               </property>
+              </widget>
+             </item>
+             <item row="2" column="1">
+              <widget class="QDoubleSpinBox" name="doubleSpinBox_LaserMax">
+               <property name="suffix">
+                <string> mA</string>
+               </property>
+               <property name="decimals">
+                <number>1</number>
+               </property>
+               <property name="maximum">
+                <double>200.000000000000000</double>
+               </property>
+               <property name="singleStep">
+                <double>0.100000000000000</double>
+               </property>
+               <property name="value">
+                <double>100.000000000000000</double>
                </property>
               </widget>
              </item>
@@ -454,7 +483,7 @@
                   <number>0</number>
                  </property>
                  <property name="maximum">
-                  <double>1000.000000000000000</double>
+                  <double>100000.000000000000000</double>
                  </property>
                 </widget>
                </item>
@@ -471,7 +500,7 @@
                   <number>0</number>
                  </property>
                  <property name="maximum">
-                  <double>1000.000000000000000</double>
+                  <double>100000.000000000000000</double>
                  </property>
                 </widget>
                </item>
@@ -481,7 +510,7 @@
                   <number>0</number>
                  </property>
                  <property name="maximum">
-                  <double>1000.000000000000000</double>
+                  <double>10000.000000000000000</double>
                  </property>
                 </widget>
                </item>
@@ -514,6 +543,19 @@
             </property>
            </widget>
           </item>
+          <item row="0" column="6">
+           <spacer name="horizontalSpacer">
+            <property name="orientation">
+             <enum>Qt::Horizontal</enum>
+            </property>
+            <property name="sizeHint" stdset="0">
+             <size>
+              <width>40</width>
+              <height>20</height>
+             </size>
+            </property>
+           </spacer>
+          </item>
           <item row="1" column="0">
            <widget class="QLabel" name="label_status">
             <property name="text">
@@ -528,18 +570,12 @@
             </property>
            </widget>
           </item>
-          <item row="0" column="3">
-           <spacer name="horizontalSpacer">
-            <property name="orientation">
-             <enum>Qt::Horizontal</enum>
+          <item row="0" column="0">
+           <widget class="QLabel" name="label_1">
+            <property name="text">
+             <string>Serial Port CTL200:</string>
             </property>
-            <property name="sizeHint" stdset="0">
-             <size>
-              <width>40</width>
-              <height>20</height>
-             </size>
-            </property>
-           </spacer>
+           </widget>
           </item>
           <item row="2" column="0">
            <widget class="QCheckBox" name="checkBox_pauseLogging">
@@ -585,13 +621,6 @@
             </property>
            </widget>
           </item>
-          <item row="0" column="0">
-           <widget class="QLabel" name="label_1">
-            <property name="text">
-             <string>Serial Port:</string>
-            </property>
-           </widget>
-          </item>
           <item row="0" column="2">
            <widget class="QPushButton" name="pushButton_connectDisconnect">
             <property name="text">
@@ -599,34 +628,60 @@
             </property>
            </widget>
           </item>
+          <item row="0" column="4">
+           <widget class="QLabel" name="label_SerialPort_LaseLock">
+            <property name="text">
+             <string/>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="3">
+           <widget class="QLabel" name="label_19">
+            <property name="text">
+             <string>Serial Port Laser lock:</string>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="5">
+           <widget class="QPushButton" name="pushButton_connectDisconnect_LaserLock">
+            <property name="text">
+             <string>Disconnect Laser lock</string>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="3">
+           <widget class="QLabel" name="label_status_LaserLock">
+            <property name="text">
+             <string>Status: Not connected</string>
+            </property>
+           </widget>
+          </item>
          </layout>
         </item>
         <item>
-         <widget class="QTextEdit" name="textEdit_SerialPort">
-          <property name="readOnly">
-           <bool>true</bool>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <widget class="QTextEdit" name="textEdit_SerialPort_raw">
-          <property name="readOnly">
-           <bool>true</bool>
-          </property>
-         </widget>
-        </item>
-        <item>
-         <spacer name="verticalSpacer">
-          <property name="orientation">
-           <enum>Qt::Vertical</enum>
-          </property>
-          <property name="sizeHint" stdset="0">
-           <size>
-            <width>20</width>
-            <height>40</height>
-           </size>
-          </property>
-         </spacer>
+         <layout class="QGridLayout" name="gridLayout_11">
+          <item row="0" column="0">
+           <widget class="QTextEdit" name="textEdit_SerialPort_raw">
+            <property name="readOnly">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="1" column="0">
+           <widget class="QTextEdit" name="textEdit_SerialPort">
+            <property name="readOnly">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+          <item row="0" column="1">
+           <widget class="QTextEdit" name="textEdit_SerialPort_Lock">
+            <property name="readOnly">
+             <bool>true</bool>
+            </property>
+           </widget>
+          </item>
+         </layout>
         </item>
        </layout>
       </widget>
