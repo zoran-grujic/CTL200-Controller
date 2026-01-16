@@ -69,7 +69,11 @@ class ConfigManager:
                 "p": 0.0,
                 "i": 0.0,
                 "d": 0.0,
-                "invert_pid": False
+                "invert_pid": False,
+                "dither_frequency": 0.0,
+                "dither_amplitude": 0.0,
+                "dither_phase": 0.0,
+                "harmonic": 3
             },
             "ui": {
                 "window_maximized": True,

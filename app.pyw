@@ -100,7 +100,7 @@ class MyUi(Ui_MainWindow):
         self.lock_connected = False
         self.lock_is_locked = False  # Track if device is in locked state (vs sweep mode)
         self.lock_connection_attempts = 0
-        self.lock_max_attempts = 10  # Try 10 times before giving up
+        self.lock_max_attempts = 20  # Try 20 times before giving up (with exponential backoff)
         self.lock_retry_timer = None
         self.lock_first_sweep_after_connect = False  # Flag for autoscaling after first sweep
 
@@ -113,27 +113,30 @@ class MyUi(Ui_MainWindow):
         self.lockPlotWindow = None
         self.lockPlot = None
         self.lock_plot_curve = None
+        self.lock_lockin_curve = None  # Curve for Lock-In data when dither amplitude > 0
         self.lock_vLine = None  # Vertical crosshair line
         self.lock_hLine = None  # Horizontal crosshair line
         self.lock_zero_line = None  # Green horizontal line at y=0 (visible only in lock mode)
         self.lock_values_text = None  # Text item for displaying lock values
 
         # Laser lock data storage for sweep mode
-        self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': []}
+        self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': [], 'Lock_In': []}
         self.lock_sweep_in_progress = False
         self.lock_data_buffer = ""  # Buffer for incomplete data packets
         self.lock_monitoring_timer = None  # Timer for continuous monitoring
         self.lock_range_change_timer = None  # Debounce timer for range changes
         self.lock_pending_range = None  # Store pending range change
-        self.lock_csv_pattern = re.compile(r'^\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*$')  # Validate CSV format
+        self.lock_csv_pattern = re.compile(r'^\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*$')  # Validate CSV format (3 columns)
+        self.lock_csv_pattern_with_lockin = re.compile(r'^\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?[\d.]+(?:[eE][+-]?\d+)?)\s*$')  # Validate CSV format with Lock-In (4 columns, accepts float/scientific notation)
         self.lock_last_sweep_range = None  # Track last sweep range to detect changes
         self.lock_received_points = set()  # Track received point indices for reporting
 
         # Laser lock error data storage (when locked to a point)
-        self.lock_error_data = []  # Store last 200 error values
-        self.lock_error_x_data = []  # Store last 200 x values
-        self.lock_error_y_data = []  # Store last 200 y values
-        self.lock_error_plot_curve = None  # Curve for plotting error data
+        # Note: When dither > 0, the third field is lock-in output (not error)
+        self.lock_error_data = []  # Store last 200 values (error or lock-in output depending on dither)
+        self.lock_error_x_data = []  # Store last 200 DAC values (base DAC without dither when dither > 0)
+        self.lock_error_y_data = []  # Store last 200 ADC values (raw ADC reading)
+        self.lock_error_plot_curve = None  # Curve for plotting error/lock-in data
         self.lock_error_counter = 0  # Counter for x-axis in error plot
         self.lock_initial_dac = 0  # Initial DAC value when lock was initiated
         self.lock_initial_adc = 0  # Initial ADC value when lock was initiated
@@ -343,13 +346,19 @@ class MyUi(Ui_MainWindow):
         lock_PG_layout = pg.GraphicsLayout()
         self.lockPlot = lock_PG_layout.addPlot()
         self.lockPlot.setLabel('bottom', "DAC Raw")
-        self.lockPlot.setLabel('left', "ADC Raw")
+        self.lockPlot.setLabel('left', "ADC Raw / Lock-In")
         self.lockPlot.setTitle("Laser Lock Sweep")
         self.lockPlot.showGrid(x=True, y=True)
         self.lockPlotWindow.setCentralItem(lock_PG_layout)
 
+        # Add legend to distinguish between ADC and Lock-In curves
+        self.lockPlot.addLegend(offset=(10, 10))
+
         # Initialize the lock plot curve
-        self.lock_plot_curve = self.lockPlot.plot([], [], pen=pg.mkPen(color='#00FFFF', width=2), symbol='o', symbolSize=3)
+        self.lock_plot_curve = self.lockPlot.plot([], [], pen=pg.mkPen(color='#00FFFF', width=2), symbol='o', symbolSize=3, name='ADC Raw')
+
+        # Initialize the Lock-In plot curve (for when dither amplitude > 0)
+        self.lock_lockin_curve = self.lockPlot.plot([], [], pen=pg.mkPen(color='#FF00FF', width=2), symbol='s', symbolSize=3, name='Lock-In')
 
         # Initialize the error plot curve (for locked mode - display error values)
         self.lock_error_plot_curve = self.lockPlot.plot([], [], pen=pg.mkPen(color='#FF0000', width=2), name='Lock Error')
@@ -687,6 +696,18 @@ class MyUi(Ui_MainWindow):
             self.doubleSpinBox_lock_P_3.valueChanged.connect(self.on_lock_pid_changed)
         if hasattr(self, 'checkBox_invertPID'):  # Invert PID checkbox
             self.checkBox_invertPID.stateChanged.connect(self.on_lock_pid_changed)
+
+        # Connect laser lock dither controls
+        if hasattr(self, 'doubleSpinBox_lock_dither_frequency'):
+            self.doubleSpinBox_lock_dither_frequency.valueChanged.connect(self.on_lock_dither_frequency_changed)
+        if hasattr(self, 'doubleSpinBox_lock_dither_amplitude'):
+            self.doubleSpinBox_lock_dither_amplitude.valueChanged.connect(self.on_lock_dither_amplitude_changed)
+        if hasattr(self, 'doubleSpinBox_lock_dither_phase'):
+            self.doubleSpinBox_lock_dither_phase.valueChanged.connect(self.on_lock_dither_phase_changed)
+
+        # Connect laser lock harmonic combobox
+        if hasattr(self, 'comboBox_harmonic'):
+            self.comboBox_harmonic.currentTextChanged.connect(self.on_lock_harmonic_changed)
 
         # Disable lock controls initially (enabled when device connects)
         if hasattr(self, 'groupBox_4'):
@@ -1084,6 +1105,34 @@ Last error: {self.my_serial.last_error if self.my_serial.last_error else 'Unknow
                     self.checkBox_invertPID.setChecked(lock_pid_config['invert_pid'])
                     self.checkBox_invertPID.blockSignals(False)
                     print(f"ℹ Loaded lock Invert PID={lock_pid_config['invert_pid']}")
+
+                # Update dither frequency
+                if 'dither_frequency' in lock_pid_config and hasattr(self, 'doubleSpinBox_lock_dither_frequency'):
+                    self.doubleSpinBox_lock_dither_frequency.blockSignals(True)
+                    self.doubleSpinBox_lock_dither_frequency.setValue(lock_pid_config['dither_frequency'])
+                    self.doubleSpinBox_lock_dither_frequency.blockSignals(False)
+                    print(f"ℹ Loaded lock dither frequency={lock_pid_config['dither_frequency']:.3f} Hz")
+
+                # Update dither amplitude
+                if 'dither_amplitude' in lock_pid_config and hasattr(self, 'doubleSpinBox_lock_dither_amplitude'):
+                    self.doubleSpinBox_lock_dither_amplitude.blockSignals(True)
+                    self.doubleSpinBox_lock_dither_amplitude.setValue(lock_pid_config['dither_amplitude'])
+                    self.doubleSpinBox_lock_dither_amplitude.blockSignals(False)
+                    print(f"ℹ Loaded lock dither amplitude={lock_pid_config['dither_amplitude']:.3f}")
+
+                # Update dither phase
+                if 'dither_phase' in lock_pid_config and hasattr(self, 'doubleSpinBox_lock_dither_phase'):
+                    self.doubleSpinBox_lock_dither_phase.blockSignals(True)
+                    self.doubleSpinBox_lock_dither_phase.setValue(lock_pid_config['dither_phase'])
+                    self.doubleSpinBox_lock_dither_phase.blockSignals(False)
+                    print(f"ℹ Loaded lock dither phase={lock_pid_config['dither_phase']:.3f}°")
+
+                # Update harmonic
+                if 'harmonic' in lock_pid_config and hasattr(self, 'comboBox_harmonic'):
+                    self.comboBox_harmonic.blockSignals(True)
+                    self.comboBox_harmonic.setCurrentText(str(lock_pid_config['harmonic']))
+                    self.comboBox_harmonic.blockSignals(False)
+                    print(f"ℹ Loaded lock harmonic={lock_pid_config['harmonic']}")
 
             print(f"✓ Settings applied: {', '.join(settings_applied)}")
 
@@ -2467,6 +2516,10 @@ Serial Communication Log
             lock_i = 0.0
             lock_d = 0.0
             lock_invert = False
+            lock_dither_frequency = 0.0
+            lock_dither_amplitude = 0.0
+            lock_dither_phase = 0.0
+            lock_harmonic = 3
 
             if hasattr(self, 'doubleSpinBox_lock_P'):
                 lock_p = self.doubleSpinBox_lock_P.value()
@@ -2476,16 +2529,28 @@ Serial Communication Log
                 lock_d = self.doubleSpinBox_lock_P_3.value()
             if hasattr(self, 'checkBox_invertPID'):
                 lock_invert = self.checkBox_invertPID.isChecked()
+            if hasattr(self, 'doubleSpinBox_lock_dither_frequency'):
+                lock_dither_frequency = self.doubleSpinBox_lock_dither_frequency.value()
+            if hasattr(self, 'doubleSpinBox_lock_dither_amplitude'):
+                lock_dither_amplitude = self.doubleSpinBox_lock_dither_amplitude.value()
+            if hasattr(self, 'doubleSpinBox_lock_dither_phase'):
+                lock_dither_phase = self.doubleSpinBox_lock_dither_phase.value()
+            if hasattr(self, 'comboBox_harmonic'):
+                lock_harmonic = int(self.comboBox_harmonic.currentText()) if self.comboBox_harmonic.currentText() else 3
 
-            # Save laser lock PID settings
+            # Save laser lock PID settings (including dither parameters)
             self.config.set_laser_lock_pid_config(
                 p=lock_p,
                 i=lock_i,
                 d=lock_d,
-                invert_pid=lock_invert
+                invert_pid=lock_invert,
+                dither_frequency=lock_dither_frequency,
+                dither_amplitude=lock_dither_amplitude,
+                dither_phase=lock_dither_phase,
+                harmonic=lock_harmonic
             )
 
-            print(f"✓ Settings saved: Laser={laser_current:.3f}mA, Temp={temperature_setpoint:.3f}Ω, P={p_gain:.6f}, I={i_gain:.6f}, D={d_gain:.6f}, ain1={ain1_enable}, ain1_gain={ain1_curr_gain:.6f}, ain2={ain2_enable}, ain2_gain={ain2_temp_gain:.6f}, Lock PID: P={lock_p:.6f}, I={lock_i:.6f}, D={lock_d:.6f}, Invert={lock_invert}")
+            print(f"✓ Settings saved: Laser={laser_current:.3f}mA, Temp={temperature_setpoint:.3f}Ω, P={p_gain:.6f}, I={i_gain:.6f}, D={d_gain:.6f}, ain1={ain1_enable}, ain1_gain={ain1_curr_gain:.6f}, ain2={ain2_enable}, ain2_gain={ain2_temp_gain:.6f}, Lock PID: P={lock_p:.6f}, I={lock_i:.6f}, D={lock_d:.6f}, Invert={lock_invert}, Dither: Freq={lock_dither_frequency}Hz, Amp={lock_dither_amplitude}, Phase={lock_dither_phase}°, Harmonic={lock_harmonic}")
 
             if hasattr(self, 'statusbar'):
                 self.statusbar.showMessage("Settings saved to config file", 3000)
@@ -2530,12 +2595,79 @@ Serial Communication Log
         except Exception as e:
             print(f"✗ Error updating laser lock PID: {e}")
 
+    def on_lock_dither_frequency_changed(self, value):
+        """Handle laser lock dither frequency change"""
+        if not self.lock_connected:
+            return
+
+        try:
+            # Send dither frequency command to ESP32
+            cmd = f"DITHER_FREQ {value:.3f}"
+            response = self.send_lock_command(cmd)
+
+            if response:
+                print(f"✓ Laser lock dither frequency updated: {value:.3f} Hz")
+
+        except Exception as e:
+            print(f"✗ Error updating laser lock dither frequency: {e}")
+
+    def on_lock_dither_amplitude_changed(self, value):
+        """Handle laser lock dither amplitude change"""
+        if not self.lock_connected:
+            return
+
+        try:
+            # Send dither amplitude command to ESP32
+            cmd = f"DITHER_AMP {value:.3f}"
+            response = self.send_lock_command(cmd)
+
+            if response:
+                print(f"✓ Laser lock dither amplitude updated: {value:.3f}")
+
+        except Exception as e:
+            print(f"✗ Error updating laser lock dither amplitude: {e}")
+
+    def on_lock_dither_phase_changed(self, value):
+        """Handle laser lock dither phase change"""
+        if not self.lock_connected:
+            return
+
+        try:
+            # Send dither phase command to ESP32 (using DITHER_PH not DITHER_PHASE)
+            cmd = f"DITHER_PH {value}"
+            response = self.send_lock_command(cmd)
+
+            if response:
+                print(f"✓ Laser lock dither phase updated: {value} degrees")
+
+        except Exception as e:
+            print(f"✗ Error updating laser lock dither phase: {e}")
+
+    def on_lock_harmonic_changed(self, value):
+        """Handle laser lock harmonic combobox change"""
+        if not self.lock_connected:
+            return
+
+        try:
+            # Convert string value to int
+            harmonic_value = int(value) if value else 3
+
+            # Send harmonic command to ESP32
+            cmd = f"HARMONIC {harmonic_value}"
+            response = self.send_lock_command(cmd)
+
+            if response:
+                print(f"✓ Laser lock harmonic updated: {harmonic_value}")
+
+        except Exception as e:
+            print(f"✗ Error updating laser lock harmonic: {e}")
 
 
     def connect_laser_lock_device(self):
         """
         Connect to ESP32 laser lock device via serial port.
         Tries last known port first, then scans all available ports.
+        Improved with better timeouts, retry logic, and buffer clearing.
         """
         try:
             self.lock_connection_attempts += 1
@@ -2552,6 +2684,11 @@ Serial Communication Log
             if ctl200_port:
                 available_ports = [p for p in available_ports if p != ctl200_port]
 
+            if not available_ports:
+                print("⚠ No available serial ports found")
+                self._schedule_connection_retry("No ports available")
+                return False
+
             # Optimize search: try last known port first
             last_lock_port = self.config.get("esp32_laser_lock", "last_port", "")
             if last_lock_port and last_lock_port in available_ports:
@@ -2559,20 +2696,38 @@ Serial Communication Log
                 available_ports.insert(0, last_lock_port)
 
             # Scan ports to find the laser lock device
-            for port in available_ports:
+            for port_idx, port in enumerate(available_ports):
                 try:
                     import serial
-                    test_serial = serial.Serial(port, 115200, timeout=0.5)
-                    time.sleep(0.1)
 
-                    # Query device identity
-                    test_serial.write(b"whois?\n")
-                    time.sleep(0.1)
+                    # Try to open port with longer timeout for reliability
+                    test_serial = serial.Serial(port, 115200, timeout=1.5)
 
-                    # Check response
+                    # Clear any stale data in buffers
+                    test_serial.reset_input_buffer()
+                    test_serial.reset_output_buffer()
+                    time.sleep(0.2)  # Give device time to stabilize
+
+                    # Try identity query with multiple attempts
                     response = ""
-                    if test_serial.in_waiting > 0:
-                        response = test_serial.read(test_serial.in_waiting).decode('utf-8', errors='ignore')
+                    for attempt in range(3):  # Try up to 3 times per port
+                        test_serial.write(b"whois?\n")
+                        time.sleep(0.15)  # Wait longer for response
+
+                        # Read response with multiple checks
+                        for read_attempt in range(3):
+                            if test_serial.in_waiting > 0:
+                                new_data = test_serial.read(test_serial.in_waiting).decode('utf-8', errors='ignore')
+                                response += new_data
+
+                                # Check if we got the expected response
+                                if "Laser lock by BGMAGLAB" in response:
+                                    break
+                            time.sleep(0.1)  # Wait a bit between reads
+
+                        # If we got the response, stop trying
+                        if "Laser lock by BGMAGLAB" in response:
+                            break
 
                     # Verify device identity
                     if "Laser lock by BGMAGLAB" in response:
@@ -2661,6 +2816,25 @@ Device: Laser lock by BGMAGLAB<br><br>
                         self.send_lock_command(f"PID {p_val} {i_val} {d_val}")
                         print(f"✓ Sent PID values: P={p_val}, I={i_val}, D={d_val}")
 
+                        # Send dither parameters from UI
+                        dither_freq = 0.0
+                        dither_amp = 0.0
+                        dither_phase = 0.0
+                        harmonic = 3
+                        if hasattr(self, 'doubleSpinBox_lock_dither_frequency'):
+                            dither_freq = self.doubleSpinBox_lock_dither_frequency.value()
+                            self.send_lock_command(f"DITHER_FREQ {dither_freq}")
+                        if hasattr(self, 'doubleSpinBox_lock_dither_amplitude'):
+                            dither_amp = self.doubleSpinBox_lock_dither_amplitude.value()
+                            self.send_lock_command(f"DITHER_AMP {dither_amp}")
+                        if hasattr(self, 'doubleSpinBox_lock_dither_phase'):
+                            dither_phase = self.doubleSpinBox_lock_dither_phase.value()
+                            self.send_lock_command(f"DITHER_PH {dither_phase}")
+                        if hasattr(self, 'comboBox_harmonic'):
+                            harmonic = int(self.comboBox_harmonic.currentText()) if self.comboBox_harmonic.currentText() else 3
+                            self.send_lock_command(f"HARMONIC {harmonic}")
+                        print(f"✓ Sent dither values: Freq={dither_freq}Hz, Amp={dither_amp}, Phase={dither_phase}°, Harmonic={harmonic}")
+
                         # Start sweep with full range
                         self.send_lock_command("sweep 0 65535")
                         print("ℹ Started full range sweep (0-65535)")
@@ -2670,42 +2844,47 @@ Device: Laser lock by BGMAGLAB<br><br>
 
                         return True
                     else:
+                        # Wrong device or no response
                         test_serial.close()
+                        if response:
+                            print(f"  Port {port}: Wrong device (response: {response[:50]})")
+                        else:
+                            print(f"  Port {port}: No response to whois query")
 
-                except Exception:
-                    # Silent failure - port unavailable or wrong device
+                except serial.SerialException as e:
+                    # Port is busy or inaccessible
+                    print(f"  Port {port}: Busy or inaccessible ({str(e)[:50]})")
+                    continue
+                except Exception as e:
+                    # Other errors
+                    print(f"  Port {port}: Error ({str(e)[:50]})")
                     continue
 
-            # Schedule retry or report failure
-            if self.lock_connection_attempts < self.lock_max_attempts:
-                self._update_lock_connection_status(f"Not found. Retrying... ({self.lock_max_attempts - self.lock_connection_attempts} left)")
-
-                if not self.lock_retry_timer:
-                    self.lock_retry_timer = QtCore.QTimer()
-                    self.lock_retry_timer.setSingleShot(True)
-                    self.lock_retry_timer.timeout.connect(self.connect_laser_lock_device)
-                self.lock_retry_timer.start(3000)
-            else:
-                print(f"✗ ESP32 laser lock not found after {self.lock_max_attempts} attempts")
-                self._update_lock_connection_status(f"✗ Not found")
-
+            # No device found - schedule retry or report failure
+            self._schedule_connection_retry("Device not found on any port")
             return False
 
         except Exception as e:
             print(f"✗ ESP32 laser lock connection error: {e}")
-
-            if self.lock_connection_attempts < self.lock_max_attempts:
-                self._update_lock_connection_status(f"Error. Retrying...")
-
-                if not self.lock_retry_timer:
-                    self.lock_retry_timer = QtCore.QTimer()
-                    self.lock_retry_timer.setSingleShot(True)
-                    self.lock_retry_timer.timeout.connect(self.connect_laser_lock_device)
-                self.lock_retry_timer.start(3000)
-            else:
-                self._update_lock_connection_status(f"✗ Connection failed")
-
+            self._schedule_connection_retry(f"Connection error: {str(e)[:30]}")
             return False
+
+    def _schedule_connection_retry(self, reason):
+        """Schedule a retry attempt for laser lock connection"""
+        if self.lock_connection_attempts < self.lock_max_attempts:
+            # Use exponential backoff: 1s, 2s, 3s, 4s, 5s (capped at 5s)
+            retry_delay = min(self.lock_connection_attempts * 1000, 5000)
+
+            self._update_lock_connection_status(f"{reason}. Retry in {retry_delay//1000}s... ({self.lock_max_attempts - self.lock_connection_attempts} left)")
+
+            if not self.lock_retry_timer:
+                self.lock_retry_timer = QtCore.QTimer()
+                self.lock_retry_timer.setSingleShot(True)
+                self.lock_retry_timer.timeout.connect(self.connect_laser_lock_device)
+            self.lock_retry_timer.start(retry_delay)
+        else:
+            print(f"✗ ESP32 laser lock not found after {self.lock_max_attempts} attempts")
+            self._update_lock_connection_status(f"✗ Not found after {self.lock_max_attempts} attempts")
 
     def _update_lock_connection_status(self, message):
         """Update the ESP32 laser lock connection status display"""
@@ -2751,8 +2930,12 @@ Device: Laser lock by BGMAGLAB<br><br>
                 # Read available data
                 new_data = self.lock_serial.box.read(bytes_waiting).decode('utf-8', errors='ignore')
 
-                # Uncomment for detailed debugging:
-                # print(f"ℹ Received {bytes_waiting} bytes, buffer size now: {len(self.lock_data_buffer) + len(new_data)}")
+                # DEBUG: Show what data is being received
+                # print(f"DEBUG: Received {bytes_waiting} bytes, buffer size now: {len(self.lock_data_buffer) + len(new_data)}")
+                # if len(new_data) < 200:
+                #    print(f"DEBUG: New data: {repr(new_data)}")
+                # else:
+                #    print(f"DEBUG: New data (first 200 chars): {repr(new_data[:200])}")
 
                 # Add to buffer
                 self.lock_data_buffer += new_data
@@ -2766,8 +2949,10 @@ Device: Laser lock by BGMAGLAB<br><br>
     def _process_lock_data_buffer(self):
         """
         Process buffered serial data.
-        - In locked mode: Parse "lock, x, y, error" format
-        - In sweep mode: Parse CSV format "Point,DAC_Raw,ADC_Raw"
+        - In locked mode: Parse "lock,<field1>,<field2>,<field3>" format
+          When dither > 0: lock,<baseDacOutput>,<adcRaw>,<lockinOutput>
+          When dither = 0: lock,<dacOutput>,<adcRaw>,<error>
+        - In sweep mode: Parse CSV format "Point,DAC_Raw,ADC_Raw" or "Point,DAC_Raw,ADC_Raw,Lock-In"
         Reports lost points or partial sweeps to console.
         """
         try:
@@ -2786,19 +2971,21 @@ Device: Laser lock by BGMAGLAB<br><br>
                     if not line or line.startswith('#'):
                         continue
 
-                    # Parse "lock, x, y, error" format
+                    # Parse "lock,<field1>,<field2>,<field3>" format
+                    # When dither > 0: baseDacOutput, adcRaw, lockinOutput
+                    # When dither = 0: dacOutput, adcRaw, error
                     if line.lower().startswith('lock'):
                         try:
                             parts = line.split(',')
                             if len(parts) >= 4:
-                                x_val = int(parts[1].strip())
-                                y_val = int(parts[2].strip())
-                                error_val = int(parts[3].strip())
+                                dac_val = int(parts[1].strip())      # Base DAC output (without dither) or DAC output
+                                adc_val = int(parts[2].strip())      # Raw ADC reading
+                                third_val = float(parts[3].strip())  # Lock-in output (dither > 0) or error (dither = 0)
 
-                                # Store the last 200 error values
-                                self.lock_error_data.append(error_val)
-                                self.lock_error_x_data.append(x_val)
-                                self.lock_error_y_data.append(y_val)
+                                # Store the last 200 values
+                                self.lock_error_data.append(third_val)
+                                self.lock_error_x_data.append(dac_val)
+                                self.lock_error_y_data.append(adc_val)
 
                                 # Keep only last 200 values
                                 if len(self.lock_error_data) > 200:
@@ -2808,9 +2995,12 @@ Device: Laser lock by BGMAGLAB<br><br>
 
                                 # Update the text display with current values
                                 if self.lock_values_text:
-                                    # Calculate standard deviation of error
-                                    error_std = np.std(self.lock_error_data) if len(self.lock_error_data) > 1 else 0
-                                    text = f"DAC: {x_val} ({self.lock_initial_dac})\nADC: {y_val} ({self.lock_initial_adc})\nError: {error_val}\nStd: {error_std:.2f}"
+                                    # Calculate standard deviation
+                                    data_std = np.std(self.lock_error_data) if len(self.lock_error_data) > 1 else 0
+
+                                    # Check if we have dither enabled (heuristic: if third value is typically larger than a few hundred, likely lock-in)
+                                    # Display appropriate label
+                                    text = f"DAC: {dac_val} ({self.lock_initial_dac})\nADC: {adc_val} ({self.lock_initial_adc})\nLock-In/Error: {third_val:.1f}\nStd: {data_std:.2f}"
                                     self.lock_values_text.setText(text)
                                     # Position at top right corner of visible range
                                     view_range = self.lockPlot.getViewBox().viewRange()
@@ -2818,7 +3008,7 @@ Device: Laser lock by BGMAGLAB<br><br>
                                     y_max = view_range[1][1]
                                     self.lock_values_text.setPos(x_max, y_max)
 
-                                # Update the plot with error values
+                                # Update the plot with error/lock-in values
                                 self.update_lock_error_plot()
 
                         except Exception as e:
@@ -2829,31 +3019,16 @@ Device: Laser lock by BGMAGLAB<br><br>
             # Otherwise, process sweep mode data
             # Detect sweep start marker from device
             if "# Starting sweep" in self.lock_data_buffer:
-                print("ℹ Detected sweep start marker")
-                if self.lock_sweep_in_progress:
-                    # New sweep started while previous was still in progress -> partial sweep
-                    # DO NOT update plot with incomplete data
-                    if self.lock_received_points:
-                        min_p = min(self.lock_received_points)
-                        max_p = max(self.lock_received_points)
-                        expected = set(range(min_p, max_p + 1))
-                        missing = sorted(expected - self.lock_received_points)
-                        if missing:
-                            if len(missing) <= 20:
-                                print(f"⚠ Partial sweep discarded: received {len(self.lock_received_points)} points before new sweep. Missing {len(missing)} points: {missing}")
-                            else:
-                                print(f"⚠ Partial sweep discarded: received {len(self.lock_received_points)} points before new sweep. Missing {len(missing)} points (first 20: {missing[:20]})")
-                        else:
-                            print(f"ℹ Partial sweep discarded: received {len(self.lock_received_points)} contiguous points ({min_p}..{max_p}) before new sweep.")
-                    else:
-                        print("⚠ Partial sweep: no data points received before new sweep started.")
+                if self.lock_sweep_in_progress and self.lock_received_points:
+                    # New sweep started while previous was in progress -> partial sweep
+                    print(f"⚠ Partial sweep discarded: {len(self.lock_received_points)} points")
 
                 # Start new sweep - discard all data before "# Starting sweep" marker
                 sweep_marker_pos = self.lock_data_buffer.find("# Starting sweep")
                 self.lock_data_buffer = self.lock_data_buffer[sweep_marker_pos:]  # Keep only from marker onwards
 
                 self.lock_sweep_in_progress = True
-                self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': []}
+                self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': [], 'Lock_In': []}
                 self.lock_received_points.clear()
 
             # If sweep is in progress, parse data lines
@@ -2874,12 +3049,33 @@ Device: Laser lock by BGMAGLAB<br><br>
                     # Skip headers, comments, and command echoes (check anywhere in line)
                     if (line.startswith('#') or
                         'Point,DAC_Raw,ADC_Raw' in line or
+                        'Lock-In' in line or
                         'Lock CMD:' in line or
                         'sweep ' in line.lower() or
                         '->' in line):
                         continue
 
-                    # Validate line matches CSV format: number,number,number (entire line)
+                    # Try to match 4-column format first (with Lock-In)
+                    match = self.lock_csv_pattern_with_lockin.match(line)
+                    if match:
+                        try:
+                            point = int(match.group(1))
+                            dac_raw = int(match.group(2))
+                            adc_raw = int(match.group(3))
+                            lock_in = float(match.group(4))  # Parse as float for decimal values
+
+                            # Store data
+                            self.lock_sweep_data['Point'].append(point)
+                            self.lock_sweep_data['DAC_Raw'].append(dac_raw)
+                            self.lock_sweep_data['ADC_Raw'].append(adc_raw)
+                            self.lock_sweep_data['Lock_In'].append(lock_in)
+                            self.lock_received_points.add(point)
+
+                        except ValueError:
+                            pass  # Skip malformed lines
+                        continue
+
+                    # Try 3-column format (without Lock-In)
                     match = self.lock_csv_pattern.match(line)
                     if match:
                         try:
@@ -2891,31 +3087,28 @@ Device: Laser lock by BGMAGLAB<br><br>
                             self.lock_sweep_data['Point'].append(point)
                             self.lock_sweep_data['DAC_Raw'].append(dac_raw)
                             self.lock_sweep_data['ADC_Raw'].append(adc_raw)
+                            # Don't append to Lock_In list - keep it empty for 3-column format
                             self.lock_received_points.add(point)
-
-                            # Log progress every 50 points
-                            if len(self.lock_sweep_data['Point']) % 50 == 0:
-                                print(f"ℹ Sweep progress: {len(self.lock_sweep_data['Point'])} points collected")
 
                         except ValueError:
                             pass  # Skip malformed lines
 
                 # Check for complete packet (200 points expected)
                 if len(self.lock_sweep_data['Point']) >= 200:
-                    print(f"ℹ Sweep data complete: {len(self.lock_sweep_data['Point'])} points, DAC range: {min(self.lock_sweep_data['DAC_Raw'])}-{max(self.lock_sweep_data['DAC_Raw'])}, ADC range: {min(self.lock_sweep_data['ADC_Raw'])}-{max(self.lock_sweep_data['ADC_Raw'])}")
-                    # Report lost points before completing
+                    # Report completion with Lock-In indicator if present
+                    has_lockin = len(self.lock_sweep_data['Lock_In']) > 0
+                    lockin_str = " (with Lock-In)" if has_lockin else ""
+
+                    # Check for missing points
                     if self.lock_received_points:
                         min_p = min(self.lock_received_points)
                         max_p = max(self.lock_received_points)
                         expected = set(range(min_p, max_p + 1))
                         missing = sorted(expected - self.lock_received_points)
                         if missing:
-                            if len(missing) <= 20:
-                                print(f"⚠ Sweep complete with lost points: received {len(self.lock_received_points)}/200 points. Missing: {missing}")
-                            else:
-                                print(f"⚠ Sweep complete with lost points: received {len(self.lock_received_points)}/200 points. Missing {len(missing)} points (first 20: {missing[:20]})")
+                            print(f"⚠ Sweep complete{lockin_str}: {len(self.lock_received_points)}/200 points (missing {len(missing)})")
                         else:
-                            print(f"✓ Sweep complete: all {len(self.lock_received_points)} points received contiguously ({min_p}..{max_p}).")
+                            print(f"✓ Sweep complete{lockin_str}: {len(self.lock_received_points)} points")
 
                     self.lock_sweep_in_progress = False
                     self.update_lock_plot()
@@ -2973,7 +3166,7 @@ Device: Laser lock by BGMAGLAB<br><br>
 
         try:
             # Clear data structures to prevent contamination from previous sweep
-            self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': []}
+            self.lock_sweep_data = {'Point': [], 'DAC_Raw': [], 'ADC_Raw': [], 'Lock_In': []}
             self.lock_data_buffer = ""
             self.lock_sweep_in_progress = False  # Set True when device responds
             self.lock_last_sweep_range = (start_val, stop_val)
@@ -3183,6 +3376,11 @@ Device: Laser lock by BGMAGLAB<br><br>
                             if self.lock_plot_curve:
                                 self.lock_plot_curve.setData([], [])
 
+                            # Clear Lock-In curve
+                            if self.lock_lockin_curve:
+                                self.lock_lockin_curve.setData([], [])
+                                self.lock_lockin_curve.setVisible(False)
+
                             # Send lock command
                             self.send_lock_command(f"lock {dac_value} {adc_value}")
                             print(f"✓ Lock command sent: lock {dac_value} {adc_value}")
@@ -3215,11 +3413,10 @@ Device: Laser lock by BGMAGLAB<br><br>
         Temporarily blocks range change signals to prevent triggering new sweeps during update.
         Skips first data point as it's often unreliable.
         Autoscales after first sweep following connection.
+        Shows Lock-In data if available (dither amplitude > 0).
         """
         try:
-            print(f"ℹ update_lock_plot called: {len(self.lock_sweep_data.get('DAC_Raw', []))} DAC points")
             if self.lock_plot_curve and len(self.lock_sweep_data['DAC_Raw']) > 1:
-                print(f"ℹ Updating plot with {len(self.lock_sweep_data['DAC_Raw'])-1} points (skipping first)")
                 lock_vb = self.lockPlot.getViewBox()
                 lock_vb.sigRangeChanged.disconnect(self.on_lock_plot_range_changed)
 
@@ -3230,6 +3427,18 @@ Device: Laser lock by BGMAGLAB<br><br>
                     self.lock_sweep_data['DAC_Raw'][1:],
                     self.lock_sweep_data['ADC_Raw'][1:]
                 )
+
+                # Plot Lock-In data if available (dither amplitude > 0)
+                if len(self.lock_sweep_data['Lock_In']) > 1:
+                    self.lock_lockin_curve.setData(
+                        self.lock_sweep_data['DAC_Raw'][1:],
+                        self.lock_sweep_data['Lock_In'][1:]
+                    )
+                    self.lock_lockin_curve.setVisible(True)
+                else:
+                    # Hide Lock-In curve if no data
+                    self.lock_lockin_curve.setData([], [])
+                    self.lock_lockin_curve.setVisible(False)
 
                 # Autoscale after first sweep following connection
                 if self.lock_first_sweep_after_connect:
@@ -3251,29 +3460,29 @@ Device: Laser lock by BGMAGLAB<br><br>
 
     def update_lock_error_plot(self):
         """
-        Update lock plot with error data when in locked mode.
-        Displays the last 200 error values.
+        Update lock plot with lock-in/error data when in locked mode.
+        Displays the last 200 values (lock-in output when dither > 0, or error when dither = 0).
         """
         try:
             if self.lock_error_plot_curve and len(self.lock_error_data) > 0:
                 # Create x-axis as sample indices (0 to N-1)
                 x_data = list(range(len(self.lock_error_data)))
 
-                # Update the plot with error values
+                # Update the plot with lock-in/error values
                 self.lock_error_plot_curve.setData(x_data, self.lock_error_data)
 
-                # Auto-scale y-axis to fit error data
+                # Auto-scale y-axis to fit data
                 if len(self.lock_error_data) > 1:
-                    min_error = min(self.lock_error_data)
-                    max_error = max(self.lock_error_data)
-                    margin = (max_error - min_error) * 0.1 if max_error != min_error else 100
-                    self.lockPlot.setYRange(min_error - margin, max_error + margin, padding=0)
+                    min_val = min(self.lock_error_data)
+                    max_val = max(self.lock_error_data)
+                    margin = (max_val - min_val) * 0.1 if max_val != min_val else 100
+                    self.lockPlot.setYRange(min_val - margin, max_val + margin, padding=0)
 
                 # Set x-axis to show last 200 points
                 self.lockPlot.setXRange(0, 200, padding=0)
 
         except Exception as e:
-            print(f"✗ Error updating lock error plot: {e}")
+            print(f"✗ Error updating lock plot: {e}")
 
     def toggle_plot_splitter_orientation(self):
         """Toggle splitter orientation between vertical (stacked) and horizontal (side-by-side)"""
